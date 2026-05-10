@@ -1,516 +1,418 @@
-# Qwen2.5 LoRA Instruction Fine-Tuning
+# Qwen2.5 LoRA 指令微调
 
-A complete pipeline for instruction fine-tuning of Qwen2.5 using LoRA, covering data preparation, training, evaluation, and quantization. Designed to run on free Google Colab T4 GPU.
+基于 Qwen2.5 的 LoRA 指令微调完整流程，涵盖数据准备、训练、评估和量化。可在 Google Colab 免费 T4 GPU 上运行。
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/lhh737/Qwen-Lora-finetune/blob/main/finetune_qwen.ipynb)
-
----
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Pipeline](#pipeline)
-- [Environment Setup](#environment-setup)
-- [Model Selection](#model-selection)
-- [Fine-Tuning Method](#fine-tuning-method)
-- [Data Preparation](#data-preparation)
-- [LoRA Configuration](#lora-configuration)
-- [Training](#training)
-- [Evaluation](#evaluation)
-- [Quantization](#quantization)
-- [Project Structure](#project-structure)
-- [Results](#results)
-- [Production Gap Analysis](#production-gap-analysis)
-- [References](#references)
+[![在 Colab 中打开](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/lhh737/Qwen-Lora-finetune/blob/main/finetune_qwen.ipynb)
 
 ---
 
-## Overview
+## 目录
 
-**Problem**: Open-source large language models often underperform in domain-specific tasks. General-purpose models lack knowledge of specialized terminology and fail to follow domain-specific response patterns.
-
-**Solution**: Parameter-efficient fine-tuning using LoRA (Low-Rank Adaptation). This approach adapts a pre-trained model to a target domain with minimal computational cost — approximately 0.1% of the parameters are trainable, making it feasible on consumer GPUs.
-
-**Scope**: This project demonstrates the complete lifecycle:
-1. Data acquisition and formatting
-2. Model and method selection rationale
-3. LoRA-based fine-tuning
-4. Quantitative and qualitative evaluation
-5. Model quantization for deployment
-
-**Constraints**: Zero monetary cost (Google Colab free tier), single T4 GPU (16GB VRAM), 3000 training samples.
+- [概述](#概述)
+- [流程概览](#流程概览)
+- [环境配置](#环境配置)
+- [模型选型](#模型选型)
+- [微调方法](#微调方法)
+- [数据准备](#数据准备)
+- [LoRA 配置](#lora-配置)
+- [训练](#训练)
+- [评估](#评估)
+- [量化](#量化)
+- [项目结构](#项目结构)
+- [运行结果](#运行结果)
+- [生产环境差距分析](#生产环境差距分析)
+- [参考资料](#参考资料)
 
 ---
 
-## Pipeline
+## 概述
+
+**问题**：通用大模型在垂直领域表现不佳，缺乏专业术语知识和特定领域的回答规范。
+
+**方案**：使用 LoRA（低秩适配）进行参数高效微调。仅训练约 0.1% 的参数，即可在消费级 GPU 上完成领域适配。
+
+**范围**：本项目覆盖完整流程：
+1. 数据获取与格式化
+2. 模型与方法选型
+3. LoRA 微调训练
+4. 定量与定性评估
+5. 模型量化导出
+
+**约束条件**：零成本（Google Colab 免费版），单张 T4 GPU（16GB 显存），3000 条训练样本。
+
+---
+
+## 流程概览
 
 ```
-Data Preparation          Training                  Evaluation               Quantization
-─────────────────         ──────────                ───────────              ─────────────
-alpaca-zh dataset         Qwen2.5 base model        Base vs LoRA output      Merge LoRA weights
-  ↓                       ↓                           ↓                        ↓
-ChatML formatting         LoRA adapter injection     20 QA test set            GPTQ/AWQ INT4
-  ↓                       ↓                           ↓                        ↓
-3000 samples              SFTTrainer training        Keyword hit-rate         Quantized model
-                          (2 epochs, ~8 min)          evaluation               (~60% size reduction)
+数据准备              训练                    评估                    量化
+─────────────────    ──────────              ───────────              ─────────────
+alpaca-zh 数据集      Qwen2.5 基座模型       基座 vs LoRA 输出        合并 LoRA 权重
+  ↓                     ↓                       ↓                       ↓
+ChatML 格式转换        LoRA 适配器注入          20 道 QA 测试集          GPTQ/AWQ INT4
+  ↓                     ↓                       ↓                       ↓
+3000 条样本            SFTTrainer 训练          关键词命中率评估         量化模型导出
+                      (2 epoch, ~8 分钟)                                 (体积缩小 ~60%)
 ```
 
 ---
 
-## Environment Setup
+## 环境配置
 
-### Platform Comparison
+### 平台对比
 
-| Platform | GPU | VRAM | Cost | Session Limit | Suitability |
-|----------|-----|------|------|---------------|-------------|
-| **Google Colab (Free)** | T4 | 16 GB | ¥0 | ~1 hour | This project |
-| Google Colab (Pro) | T4/V100/A100 | 16-40 GB | ~¥80/mo | ~24 hours | Larger models |
-| Kaggle Notebooks | T4/P100 | 16 GB | ¥0 | 30h/week | Alternative |
-| AutoDL | 3090/4090/A100 | 24-80 GB | ¥2-15/hr | None | Production |
-| Local RTX GPU | 3060-4090 | 6-24 GB | Existing hardware | None | Small experiments |
+| 平台 | GPU | 显存 | 费用 | 时长限制 | 适用场景 |
+|------|-----|------|------|---------|---------|
+| **Google Colab（免费）** | T4 | 16 GB | ¥0 | ~1 小时 | 本项目 |
+| Google Colab（Pro） | T4/V100/A100 | 16-40 GB | ~¥80/月 | ~24 小时 | 更大模型 |
+| Kaggle Notebooks | T4/P100 | 16 GB | ¥0 | 30 小时/周 | 备选 |
+| AutoDL | 3090/4090/A100 | 24-80 GB | ¥2-15/时 | 无 | 生产级训练 |
+| 本地 GPU | RTX 3060-4090 | 6-24 GB | 已有硬件 | 无 | 小型实验 |
 
-**Selection Rationale**: Google Colab free tier satisfies all project requirements:
-- T4 16GB VRAM is sufficient for 1.5B LoRA (~6GB) and 7B QLoRA (~12GB)
-- Pre-configured PyTorch/CUDA environment eliminates setup overhead
-- Zero cost aligns with the learning-oriented nature of this project
-- Training time for 1.5B (~8 minutes) is well within the 1-hour session limit
-
-**Limitations**: T4 is approximately 3-4x slower than RTX 3090. Models larger than 7B cannot fit in 16GB VRAM without aggressive quantization.
-
-### Quick Start
+### 快速开始
 
 ```bash
-# 1. Clone repository
+# 1. 克隆仓库
 git clone https://github.com/lhh737/Qwen-Lora-finetune.git
 cd Qwen-Lora-finetune
 
-# 2. Open in Colab
-#    - Visit https://colab.research.google.com
-#    - Upload finetune_qwen.ipynb
-#    - Runtime → Change runtime type → T4 GPU
-#    - Execute cells sequentially (Shift+Enter)
+# 2. 在 Colab 中打开
+#    - 访问 https://colab.research.google.com
+#    - 上传 finetune_qwen.ipynb
+#    - 运行时 → 更改运行时类型 → T4 GPU
+#    - 逐格运行 (Shift+Enter)
 ```
 
-Expected runtime by model size:
+各模型预估运行时间：
 
-| Model | Method | Runtime |
-|-------|--------|---------|
-| Qwen2.5-1.5B | LoRA (FP16) | ~8 minutes |
-| Qwen2.5-7B | QLoRA (4-bit) | ~40 minutes |
+| 模型 | 方法 | 预计耗时 |
+|------|------|---------|
+| Qwen2.5-1.5B | LoRA (FP16) | ~8 分钟 |
+| Qwen2.5-7B | QLoRA (4-bit) | ~40 分钟 |
 
 ---
 
-## Model Selection
+## 模型选型
 
-### Open-Source LLM Landscape (2025-2026)
+### 开源 LLM 对比（2025-2026）
 
-| Model | Developer | Chinese | English | Code | Ecosystem |
-|-------|-----------|---------|---------|------|-----------|
-| **Qwen2.5** | Alibaba | ★★★★☆ | ★★★★☆ | ★★★★☆ | ★★★★☆ |
+| 模型 | 出品方 | 中文能力 | 英文能力 | 代码能力 | 生态成熟度 |
+|------|-------|---------|---------|---------|-----------|
+| **Qwen2.5** | 阿里巴巴 | ★★★★☆ | ★★★★☆ | ★★★★☆ | ★★★★☆ |
 | LLaMA 3.1 | Meta | ★★★☆☆ | ★★★★★ | ★★★★☆ | ★★★★★ |
-| DeepSeek-V3/R1 | DeepSeek | ★★★★★ | ★★★★★ | ★★★★★ | ★★★☆☆ |
-| GLM-4 | Zhipu AI | ★★★★★ | ★★★☆☆ | ★★★☆☆ | ★★★☆☆ |
-| Yi 1.5 | 01.AI | ★★★★☆ | ★★★★☆ | ★★★☆☆ | ★★★☆☆ |
+| DeepSeek-V3/R1 | 深度求索 | ★★★★★ | ★★★★★ | ★★★★★ | ★★★☆☆ |
+| GLM-4 | 智谱 AI | ★★★★★ | ★★★☆☆ | ★★★☆☆ | ★★★☆☆ |
+| Yi 1.5 | 零一万物 | ★★★★☆ | ★★★★☆ | ★★★☆☆ | ★★★☆☆ |
 
-### Selection Criteria
+### 选型依据
 
-Three factors determined the choice of Qwen2.5:
+选择 Qwen2.5 的三个关键因素：
 
-**1. Chinese Tokenization Efficiency**
+**1. 中文 Token 效率**
 
-Qwen2.5 uses a vocabulary of 151,642 tokens with extensive Chinese character coverage. For Chinese text, this results in fewer tokens per character compared to LLaMA 3, which was primarily optimized for English. The tokenizer dimension directly impacts both training and inference efficiency.
+Qwen2.5 词表大小为 151,642，包含大量中文字符。中文文本经 Qwen2.5 分词后 token 数量显著低于 LLaMA 3（后者主要针对英文优化），直接提升训练和推理效率。
 
-**2. HuggingFace Ecosystem Compatibility**
+**2. HuggingFace 生态兼容**
 
-Qwen2.5 follows standard Transformers library interfaces:
+Qwen2.5 遵循标准 Transformers 接口：
 
 ```python
-# Uniform loading interface across all model sizes
+# 所有尺寸的模型统一加载方式
 model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen2.5-1.5B",     # Change ID to switch model size
+    "Qwen/Qwen2.5-1.5B",     # 修改此 ID 即可切换模型
     torch_dtype="auto",
     device_map="auto",
     trust_remote_code=True,
 )
 ```
 
-This guarantees compatibility with PEFT, TRL, vLLM, and other ecosystem tools without adapter code.
+与 PEFT、TRL、vLLM 等工具完全兼容，无需适配代码。
 
-**3. Full Model Spectrum**
+**3. 完整模型谱系**
 
-The same architecture scales from 0.5B to 72B parameters, allowing experimentation at smaller sizes before scaling up. Switching from 1.5B to 7B requires only changing `MODEL_ID`.
+同一架构覆盖 0.5B 至 72B，可在小模型上快速验证后放大。从 1.5B 切换到 7B 只需修改 `MODEL_ID`。
 
-### Recommended Configuration
+### 推荐配置
 
-| Scenario | Model | Method | VRAM |
-|----------|-------|--------|------|
-| First run, rapid iteration | Qwen2.5-1.5B | LoRA (FP16) | ~6 GB |
-| Better response quality | Qwen2.5-7B | QLoRA (NF4) | ~12 GB |
+| 场景 | 模型 | 方法 | 显存需求 |
+|------|------|------|---------|
+| 首次运行、快速迭代 | Qwen2.5-1.5B | LoRA (FP16) | ~6 GB |
+| 更好回答质量 | Qwen2.5-7B | QLoRA (NF4) | ~12 GB |
 
-The technical pipeline is identical regardless of model size. The choice between 1.5B and 7B is a trade-off between training speed and output quality.
+两种配置的技术流程完全一致，差异仅在于训练速度和输出质量。
 
 ---
 
-## Fine-Tuning Method
+## 微调方法
 
-### Comparison of Approaches
+### 方案对比
 
-| Method | Trainable Params | VRAM (7B model) | Speed | Quality |
-|--------|-----------------|-----------------|-------|---------|
-| Full Fine-Tuning | 100% (7B) | ~168 GB | Slow | Best |
-| LoRA (r=16) | ~0.1% (7M) | ~14 GB | Fast | Near full FT |
-| QLoRA (NF4 + LoRA) | ~0.1% (7M) | ~6 GB | Moderate | Near LoRA |
+| 方法 | 可训练参数量 | 7B 模型显存 | 速度 | 效果 |
+|------|------------|------------|------|------|
+| 全量微调 | 100% (7B) | ~168 GB | 慢 | 最优 |
+| LoRA (r=16) | ~0.1% (7M) | ~14 GB | 快 | 接近全量微调 |
+| QLoRA (NF4 + LoRA) | ~0.1% (7M) | ~6 GB | 中等 | 接近 LoRA |
 
-### Why Not Full Fine-Tuning?
+### 全量微调显存分析
 
-Memory requirements for full fine-tuning a 7B parameter model with FP16 precision:
+7B 模型 FP16 全量微调所需显存：
 
-| Component | Memory | Calculation |
-|-----------|--------|-------------|
-| Model weights | 14 GB | 7B × 2 bytes (FP16) |
-| Gradients | 14 GB | 7B × 2 bytes (FP16) |
-| Adam optimizer states | 56 GB | 7B × 8 bytes (FP32 momentum + variance) |
-| Subtotal (without activations) | 84 GB | |
-| Activations (per batch) | 20-80 GB | Model and batch-size dependent |
-| **Total** | **~110-168 GB** | |
+| 组件 | 显存 | 计算方式 |
+|------|------|---------|
+| 模型权重 | 14 GB | 7B × 2 bytes (FP16) |
+| 梯度 | 14 GB | 7B × 2 bytes (FP16) |
+| Adam 优化器状态 | 56 GB | 7B × 8 bytes (FP32 动量 + 方差) |
+| 小计（不含激活值） | 84 GB | |
+| 激活值（每 batch） | 20-80 GB | 取决于模型和 batch size |
+| **总计** | **~110-168 GB** | |
 
-Full fine-tuning requires 4-8 A100 GPUs (80GB each), which is impractical for individual learning. LoRA reduces memory requirements by 10-20x by limiting trainable parameters to ~0.1% of the total.
+全量微调需要 4-8 张 A100 GPU（每张 80GB），个人学习场景不可行。LoRA 将可训练参数量减少至约 0.1%，显存需求降低 10-20 倍。
 
-### LoRA Principle
+### LoRA 原理
 
-LoRA (Low-Rank Adaptation) constrains weight updates to a low-rank decomposition. Given a pre-trained weight matrix _W₀_ ∈ ℝ^(d×k):
+LoRA（Low-Rank Adaptation）将权重更新约束为低秩分解形式。对于预训练权重矩阵 _W₀_ ∈ ℝ^(d×k)：
 
-_W = W₀ + ΔW = W₀ + BA_, where _B_ ∈ ℝ^(d×r), _A_ ∈ ℝ^(r×k), and _r_ ≪ min(d, k)
+_W = W₀ + ΔW = W₀ + BA_，其中 _B_ ∈ ℝ^(d×r)，_A_ ∈ ℝ^(r×k)，_r_ ≪ min(d, k)
 
-During training, _W₀_ is frozen; only _A_ and _B_ are updated. The forward pass becomes:
+训练时 _W₀_ 冻结，仅更新 _A_ 和 _B_。前向传播变为：
 
 _h = Wx = W₀x + BAx_
 
-This reduces trainable parameters from _d²_ to _2dr_. For a typical layer with d=4096 and r=16, this represents a 99.2% reduction in trainable parameters.
+可训练参数量从 _d²_ 降至 _2dr_。对于 d=4096、r=16 的典型层，参数量减少 99.2%。
 
-The effectiveness of LoRA stems from an empirical finding: pre-trained models have low **intrinsic rank** — meaning the effective dimensionality of task-specific updates is much smaller than the parameter space. Full-rank updates learn mostly redundant information that low-rank approximations capture adequately.
+LoRA 有效性的理论基础：预训练模型的权重更新量具有较低的**本质秩**（intrinsic rank），任务特定的有效更新维度远小于参数量空间。
 
 ### QLoRA
 
-QLoRA (Quantized LoRA) further reduces memory by loading the base model in 4-bit NF4 (NormalFloat4) format before applying LoRA adapters. This reduces base model memory from 14 GB to approximately 3.5 GB for a 7B model.
-
-The trade-off is a 20-30% training speed decrease due to dequantization overhead during each forward pass.
+QLoRA（Quantized LoRA）将基座模型以 4-bit NF4 格式加载后再应用 LoRA，7B 模型显存占用从 14GB 降至约 3.5GB。代价是训练速度降低 20-30%（每次前向传播需反量化）。
 
 ---
 
-## Data Preparation
+## 数据准备
 
-### Instruction Fine-Tuning vs. Continued Pretraining
+### 指令微调 vs 继续预训练
 
-| Aspect | Instruction Fine-Tuning (SFT) | Continued Pretraining |
-|--------|------------------------------|----------------------|
-| Objective | Teach response format and behavior | Inject domain knowledge |
-| Data format | (instruction, response) pairs | Raw text corpora |
-| Data volume | Thousands to tens of thousands | Millions to billions of tokens |
-| Effect | Improves instruction following | Improves knowledge coverage |
+| 维度 | 指令微调 (SFT) | 继续预训练 |
+|------|---------------|-----------|
+| 目标 | 学习回答格式和行为规范 | 注入领域知识 |
+| 数据格式 | (指令, 回答) 配对 | 纯文本语料 |
+| 数据量 | 数千至数万条 | 数亿至数十亿 token |
+| 效果 | 提升指令遵循能力 | 提升知识覆盖 |
 
-### Dataset Comparison
+### 数据集对比
 
-| Dataset | Size | Quality | Format | Access |
-|---------|------|---------|--------|--------|
-| **alpaca-zh** | 52K | ★★★☆ | Standard | HuggingFace |
-| BELLE | 3.5M | ★★★★ | Standard | HuggingFace |
-| Firefly | 1.1M | ★★★★ | Standard | HuggingFace |
-| COIG | 50K | ★★★★ | Standard | HuggingFace |
+| 数据集 | 规模 | 质量 | 格式 | 获取方式 |
+|-------|------|------|------|---------|
+| **alpaca-zh** | 52K | ★★★☆ | 标准 | HuggingFace |
+| BELLE | 3.5M | ★★★★ | 标准 | HuggingFace |
+| Firefly | 1.1M | ★★★★ | 标准 | HuggingFace |
 
-**Selection**: alpaca-zh is chosen for low barrier to entry (direct HuggingFace loading), consistent format (instruction + input + output per sample), and sufficient quality for a learning project. 3000 samples are adequate for demonstrating the pipeline.
+选择 alpaca-zh 的原因：HuggingFace 直接加载、格式规范统一、适合学习场景。项目使用 3000 条子集即可完成流程验证。
 
-### ChatML Format
+### ChatML 格式
 
-Different models require different conversational formats:
+不同模型使用不同的对话格式，必须与预训练格式一致：
 
 ```
 Qwen2.5 (ChatML):
 <|im_start|>user
-{question}
+{问题}
 <|im_end|>
 <|im_start|>assistant
-{response}
+{回答}
 <|im_end|>
 
 LLaMA 3:
 <|begin_of_text|><|start_header_id|>user<|end_header_id|>
-{question}<|eot_id|>
+{问题}<|eot_id|>
 <|start_header_id|>assistant<|end_header_id|>
-{response}<|eot_id|>
+{回答}<|eot_id|>
 ```
 
-The ChatML format must match the model's pre-training format. Format mismatch can cause training to fail (no loss decrease) or produce unusable model outputs.
-
-### Data Preparation Code
-
-```python
-from datasets import load_dataset
-
-dataset = load_dataset("shibing624/alpaca-zh", split="train")
-dataset = dataset.select(range(3000))
-
-CHAT_TEMPLATE = """<|im_start|>user
-{instruction}
-<|im_end|>
-<|im_start|>assistant
-{output}
-<|im_end|>"""
-
-def format_chat(ex):
-    return {"text": CHAT_TEMPLATE.format(
-        instruction=ex["instruction"], output=ex["output"]
-    )}
-
-dataset = dataset.map(format_chat)
-```
+格式不匹配会导致训练失败（loss 不下降）或模型输出不可用。
 
 ---
 
-## LoRA Configuration
+## LoRA 配置
 
-### Parameters
+### 参数说明
 
-**Rank (r)**: Controls the dimensionality of low-rank matrices. Higher rank increases expressiveness at the cost of more trainable parameters.
+**rank (r)**：控制低秩矩阵的维度。rank 越高表达能力越强，但参数量也越大。
 
-```python
-r=1   →  2×d×1 parameters (minimal capacity)
-r=8   →  2×d×8 parameters (minimum effective)
-r=16  →  2×d×16 parameters (recommended starting point)
-r=32  →  2×d×32 parameters (high capacity)
-r=64  →  2×d×64 parameters (diminishing returns)
-```
+| 配置 | 参数量 | 适用场景 |
+|------|--------|---------|
+| r=8 | 2×d×8 | 最小有效配置 |
+| **r=16** | 2×d×16 | **推荐起始值** |
+| r=32 | 2×d×32 | 高容量需求 |
 
-Empirical evidence from QLoRA paper and community practice indicates that r=16 provides the best balance across most tasks. Increasing beyond 16 yields marginal improvements.
+实验表明 r=16 在大多数任务中达到收益平衡点，继续增大 rank 的边际收益递减。
 
-**lora_alpha**: Controls the scaling factor applied to LoRA updates:
+**lora_alpha**：LoRA 更新的缩放因子。实际更新量为 `(lora_alpha / r) × BA`。`lora_alpha = 2r`（缩放因子 2）是最常见配置。
 
-`actual_update = (lora_alpha / r) × BA`
+**target_modules**：LoRA 应用的目标参数矩阵。通常选择全部注意力层（q_proj, k_proj, v_proj, o_proj），在表达能力和参数量之间取得平衡。
 
-Setting `lora_alpha = 2r` (scaling factor of 2) is the most common configuration. The scaling compensates for the zero initialization of B, which would otherwise produce near-zero updates at the start of training.
+**lora_dropout**：LoRA 层的 dropout 比率。小数据集（数千条）训练时 0.05 提供有效的正则化。
 
-**target_modules**: Specifies which parameter matrices receive LoRA adapters.
-
-| Module | Layer | Purpose | Include |
-|--------|-------|---------|---------|
-| q_proj | Attention | Query projection | ✅ |
-| k_proj | Attention | Key projection | ✅ |
-| v_proj | Attention | Value projection | ✅ |
-| o_proj | Attention | Output projection | ✅ |
-| gate_proj | FFN | Gate | Optional |
-| up_proj | FFN | Up-projection | Optional |
-| down_proj | FFN | Down-projection | Optional |
-
-Fine-tuning only attention layers is standard practice: it captures the most task-relevant adaptations while minimizing trainable parameters. Adding MLP layers doubles parameter count with limited additional benefit for most tasks.
-
-**lora_dropout**: Dropout rate applied to LoRA layer outputs. The 0.05 default provides regularization when training on small datasets (thousands of samples).
-
-### Default Configuration
+### 默认配置
 
 ```python
 LoraConfig(
     r=16,
-    lora_alpha=32,                      # 2r for scaling factor of 2
+    lora_alpha=32,                      # 2r，缩放因子 2
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
     lora_dropout=0.05,
-    bias="none",                        # Do not train bias terms
-    task_type="CAUSAL_LM",              # Causal language modeling
+    bias="none",                        # 不训练偏置项
+    task_type="CAUSAL_LM",              # 因果语言模型
 )
 ```
 
 ---
 
-## Training
+## 训练
 
-### Code Structure
+### 关键参数
 
-The training script (`train_lora.py`) consists of four phases:
+| 参数 | 值 | 说明 |
+|------|------|------|
+| `per_device_train_batch_size` | 4 | 每张 GPU 每步样本数 |
+| `gradient_accumulation_steps` | 4 | 梯度累积步数，等效 batch = 4×4=16 |
+| `num_train_epochs` | 2 | 训练轮数 |
+| `learning_rate` | 2e-4 | 学习率，LoRA 通常比全量微调高 2-4 倍 |
+| `fp16` | True | 混合精度训练，节省显存 |
 
-1. **Tokenizer loading**: `AutoTokenizer.from_pretrained()` with appropriate pad_token configuration
-2. **Model loading**: `AutoModelForCausalLM.from_pretrained()` with `torch_dtype="auto"` and `device_map="auto"`
-3. **LoRA configuration**: `LoraConfig` with the parameters specified above
-4. **Training execution**: `SFTTrainer` from the TRL library, which wraps HuggingFace `Trainer` with automatic data formatting for instruction tuning
+### Loss 指标参考
 
-### Key Training Arguments
+Qwen2.5-1.5B + 3000 条数据 + 2 epoch 的预期 loss 曲线：
 
-| Argument | Value | Purpose |
-|----------|-------|---------|
-| `per_device_train_batch_size` | 4 | Samples per GPU per step |
-| `gradient_accumulation_steps` | 4 | Accumulate gradients over N steps; effective batch = 4×4=16 |
-| `num_train_epochs` | 2 | Training cycles over the dataset |
-| `learning_rate` | 2e-4 | LoRA requires 2-4× higher LR than full FT |
-| `fp16` | True | Mixed precision for VRAM efficiency |
+| Step | Loss | 说明 |
+|------|------|------|
+| 0 | ~1.8 | 初始状态 |
+| 20 | ~1.2 | 快速下降，学习对话格式 |
+| 50 | ~0.9 | 稳定下降 |
+| 100 | ~0.7 | 接近收敛 |
+| 结束 | ~0.5-0.6 | 训练完成 |
 
-**Effective batch size** = batch_size × gradient_accumulation = 16. Gradient accumulation enables larger effective batch sizes without exceeding VRAM limits.
+### 常见问题
 
-**Learning rate**: LoRA typically uses 1e-4 to 5e-4, higher than full fine-tuning (1e-5 to 5e-5), because fewer parameters require larger update steps.
-
-### Loss Interpretation
-
-Expected loss curve for Qwen2.5-1.5B + 3000 samples + 2 epochs:
-
-| Step | Loss | Interpretation |
-|------|------|----------------|
-| 0 | ~1.8 | Initial state, near-random prediction |
-| 20 | ~1.2 | Rapid decrease, learning dialogue format |
-| 50 | ~0.9 | Steady improvement |
-| 100 | ~0.7 | Approaching convergence |
-| End | ~0.5-0.6 | Converged |
-
-Loss values are model- and dataset-dependent. Focus on the **trend** (monotonically decreasing) rather than absolute values. Loss below 0.3 may indicate overfitting; loss above 1.5 after extended training suggests configuration issues (data format, learning rate, or model loading errors).
-
-### Common Issues
-
-| Symptom | Likely Cause | Resolution |
-|---------|-------------|------------|
-| Loss stagnant (>2.0) | Data format mismatch | Verify ChatML formatting, print sample data |
-| Loss < 0.1 | Overfitting | Reduce epochs, increase dropout, add data |
-| Loss oscillating | Learning rate too high | Reduce to 1e-4 or 5e-5 |
-| CUDA OOM | Batch size too large | Reduce per_device_train_batch_size |
+| 现象 | 原因 | 解决方案 |
+|------|------|---------|
+| Loss 不降（>2.0） | 数据格式错误 | 检查 ChatML 格式 |
+| Loss < 0.1 | 过拟合 | 减少 epoch、增加数据量 |
+| Loss 振荡 | 学习率过高 | 降至 1e-4 或 5e-5 |
+| CUDA OOM | Batch size 过大 | 降低 per_device_train_batch_size |
 
 ---
 
-## Evaluation
+## 评估
 
-### Problem Statement
+### 评估方法
 
-Evaluating generative language models is fundamentally different from classification tasks. Standard metrics like BLEU and ROUGE rely on n-gram overlap, which fails to capture semantic quality:
+生成式模型的评估不同于分类任务。BLEU 和 ROUGE 等指标基于 n-gram 字面匹配，无法反映语义质量。
 
-```
-Question: "LoRA 微调的核心原理是什么？"
+本项目使用**关键词命中率**方法：为每道测试题预定义 3-4 个核心关键词，计算回答中包含的关键词比例。
 
-Response A: "LoRA 通过低秩分解降低参数量，冻结原权重并插入低秩矩阵"
-Response B: "LoRA is Low-Rank Adaptation" (English, correct but different language)
-Response C: "LoRA 是一种方法" (vague, lacks specifics)
-```
-
-BLEU would incorrectly rank A and B similarly (low n-gram overlap due to different expression), while failing to distinguish A from C (both have minimal overlap with any reference).
-
-### Keyword Hit-Rate Method
-
-A deterministic evaluation approach: for each test question, pre-define 3-4 domain-specific keywords that represent essential knowledge points.
-
-| Question | Keywords |
-|----------|----------|
+| 测试题 | 关键词 |
+|--------|--------|
 | LoRA 微调的核心原理是什么？ | 低秩, 冻结, 插入, 参数量 |
 | 什么是 KV Cache？ | 缓存, Key, Value, 加速 |
 
-**Scoring**: `hit-rate = (number of keywords present in response) / (total keywords)`
+**评分公式**：`命中率 = 回答中出现的关键词数 / 总关键词数`
 
-**Rationale**: This method evaluates whether the model covers essential concepts, rather than penalizing lexical variation. It is transparent (each point maps to a specific keyword), reproducible (deterministic), and diagnostic (which concepts are consistently missed).
+**优势**：透明、可复现、可诊断。**局限性**：无法评估同义词表达、概念使用正确性和回答深度。需结合人工阅读做定性判断。
 
-**Limitations** (acknowledged):
-- Synonym coverage: models may express concepts without exact keyword matches
-- Correctness not guaranteed: keyword presence does not confirm correct usage
-- Depth not measured: shallow coverage earns the same score as deep explanation
-- Mitigation: complement quantitative hit-rate with qualitative manual review
-
-### Expected Results
+### 预期结果
 
 ```
-Metric                  Base Model    Fine-Tuned    Change
-─────────────────────   ──────────    ──────────    ──────
-Average hit-rate         ~38%          ~65%          +71%
-Questions improved       —             15/20         —
-Questions regressed      —             3/20          —
+指标                   基座模型      微调后        变化
+─────────────────────  ──────────    ──────────    ──────
+平均命中率              ~38%          ~65%          +71%
+回答更好的题数          —             15/20         —
+回答更差的题数          —             3/20          —
 ```
-
-Note: A 1.5B model has inherent capacity limitations. Upgrading to 7B would likely improve absolute scores, but the relative improvement from fine-tuning follows the same pattern.
 
 ---
 
-## Quantization
+## 量化
 
-### Motivation
+### 动机
 
-Model storage requirements by precision:
+模型精度与存储需求关系：
 
-| Model | FP16 | INT4 | Compression |
-|-------|------|------|-------------|
+| 模型规模 | FP16 | INT4 | 压缩比 |
+|---------|------|------|--------|
 | 1.5B | 3 GB | 0.8 GB | 73% |
 | 7B | 14 GB | 3.5 GB | 75% |
-| 14B | 28 GB | 7 GB | 75% |
-| 72B | 144 GB | 36 GB | 75% |
 
-Quantization reduces both storage footprint and inference latency (less data to transfer between memory and compute units).
+量化同时降低存储占用和推理延迟（减少内存与计算单元间的数据传输）。
 
-### Method Comparison
+### 方法对比
 
-| Aspect | AWQ | GPTQ |
-|--------|-----|------|
-| Principle | Activation-aware weight protection | Second-order Hessian optimization |
-| Accuracy loss | ~0.5% | ~0.5-1% |
-| Quantization speed | Fast | Moderate |
-| Inference speed | Fast (vLLM native) | Moderate |
-| Ecosystem | vLLM built-in | Mature toolchain |
+| 维度 | AWQ | GPTQ |
+|------|-----|------|
+| 原理 | 基于激活值分布保护重要权重 | 基于二阶 Hessian 优化 |
+| 精度损失 | ~0.5% | ~0.5-1% |
+| 生态 | vLLM 原生支持 | 工具链成熟 |
 
-Both methods are viable. This project supports both via `quantize.py` (default: GPTQ). AWQ is recommended for production deployment through vLLM.
+本项目通过 `quantize.py` 支持两种方法（默认 GPTQ），生产环境推荐使用 AWQ。
 
 ---
 
-## Project Structure
+## 项目结构
 
 ```
 qwen-lora-finetune/
-├── README.md                   # This file
-├── finetune_qwen.ipynb         # Colab notebook (primary entry point)
-├── data_prep.py                # Dataset loading and ChatML formatting
-├── train_lora.py               # LoRA training script (CLI with argparse)
-├── evaluate.py                 # Keyword hit-rate evaluation
-├── quantize.py                 # Model quantization (GPTQ/AWQ)
-├── requirements.txt            # Python dependencies
+├── README.md                   # 英文文档
+├── README.zh.md                # 中文文档（本文件）
+├── finetune_qwen.ipynb         # Colab 笔记本（主要入口）
+├── data_prep.py                # 数据加载与格式化
+├── train_lora.py               # LoRA 训练脚本（CLI，支持 argparse）
+├── evaluate.py                 # 关键词命中率评估
+├── quantize.py                 # 模型量化（GPTQ/AWQ）
+├── requirements.txt            # Python 依赖
 ├── .gitignore
-└── results/                    # Evaluation outputs (after running)
+└── results/                    # 评估输出目录
 ```
 
 ---
 
-## Results
+## 运行结果
 
-*Results to be added after running on Colab.*
-
-The expected output includes:
-- Training loss curve
-- Before/after evaluation comparison table
-- Per-question keyword hit-rate breakdown
+*待运行后补充。* 预期输出包括：
+- 训练 loss 曲线
+- 微调前后评估对比表
+- 单题关键词命中率明细
 
 ---
 
-## Production Gap Analysis
+## 生产环境差距分析
 
-### Comparison with Industrial Deployment
+### 与工业部署的差距
 
-| Dimension | This Project | Production Environment |
-|-----------|-------------|----------------------|
-| **Data** | Public dataset, 3K samples, general domain | Proprietary data, 10K-100K+ samples, domain-specific |
-| **Training** | Single GPU, LoRA, 2 epochs | Distributed training, multi-stage (SFT + RLHF/DPO) |
-| **Evaluation** | 20-question keyword test | Comprehensive test suite, human eval, A/B testing |
-| **Infrastructure** | Colab notebook | Containerized API (vLLM/TGI), load balancing, monitoring |
-| **Model Management** | Local file storage | Model registry (DVC/MLflow), version control, CI/CD |
-| **Monitoring** | None | Latency P50/P99, throughput, error rates, data drift |
+| 维度 | 本项目 | 生产环境 |
+|------|--------|---------|
+| **数据** | 公开数据集，3K 条，通用领域 | 私有数据，数万至数十万条，垂直领域 |
+| **训练** | 单卡 GPU，LoRA，2 epoch | 分布式训练，多阶段（SFT + RLHF/DPO） |
+| **评估** | 20 题关键词测试 | 完整测试集，人工评估，A/B 测试 |
+| **基础设施** | Colab 笔记本 | 容器化 API（vLLM/TGI），负载均衡，监控告警 |
+| **模型管理** | 本地文件 | 模型注册中心，版本控制，CI/CD |
+| **监控** | 无 | 延迟 P50/P99，吞吐量，错误率，数据漂移 |
 
-### Subsequent Learning Path
+### 后续学习方向
 
-| Direction | Actions | Resources Needed |
-|-----------|---------|-----------------|
-| Scale up | Run QLoRA on 7B model | AutoDL or Colab Pro |
-| Deepen evaluation | Implement LLM-as-Judge | API access (e.g., GPT-4, DeepSeek) |
-| Production deployment | vLLM + FastAPI + Docker | Local GPU or cloud instance |
-| Foundational understanding | Read LoRA/QLoRA papers | Academic access |
+| 方向 | 具体行动 | 所需资源 |
+|------|---------|---------|
+| 规模扩展 | 使用 QLoRA 微调 7B 模型 | AutoDL 或 Colab Pro |
+| 评估深化 | 实现 LLM-as-Judge 自动评估 | API 访问权限 |
+| 生产部署 | vLLM + FastAPI + Docker | 本地 GPU 或云实例 |
+| 原理深入 | 阅读 LoRA / QLoRA 论文原文 | 学术访问 |
 
 ---
 
-## References
+## 参考资料
 
 - Hu et al. "LoRA: Low-Rank Adaptation of Large Language Models." ICLR 2022.
 - Dettmers et al. "QLoRA: Efficient Finetuning of Quantized LLMs." NeurIPS 2023.
 - Qwen Team. "Qwen2.5 Technical Report." arXiv:2412.15115, 2024.
-- HuggingFace PEFT Documentation. https://huggingface.co/docs/peft
-- HuggingFace TRL Documentation. https://huggingface.co/docs/trl
-- alpaca-zh Dataset. https://huggingface.co/datasets/shibing624/alpaca-zh
-
----
-
-## License
-
-This project is for educational purposes.
+- HuggingFace PEFT 文档. https://huggingface.co/docs/peft
+- HuggingFace TRL 文档. https://huggingface.co/docs/trl
+- alpaca-zh 数据集. https://huggingface.co/datasets/shining624/alpaca-zh
