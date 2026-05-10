@@ -1,645 +1,255 @@
-# 大模型指令微调：从零到实践
+# Qwen2.5 LoRA Instruction Fine-Tuning
 
-> 一份严肃的大模型微调入门教程。基于 Qwen2.5 + LoRA，从理论到代码，从选型到评估，完整走一遍。
->
-> **目标读者**：有 Python 和深度学习基础，但没亲手做过 LLM 微调的人。
-> **前置知识**：了解 Transformer、Python、PyTorch 基础。
-> **硬件成本**：¥0（Google Colab 免费 T4 GPU）。
+A complete pipeline for instruction fine-tuning of Qwen2.5 using LoRA, covering data preparation, training, evaluation, and quantization. Designed to run on free Google Colab T4 GPU.
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/lhh737/Qwen-Lora-finetune/blob/main/finetune_qwen.ipynb)
 
 ---
 
-## 关于这份教程
+## Table of Contents
 
-### 它不是什么
-
-这不是一份"三分钟速成"指南，也不是"复制粘贴就能跑"的代码仓库。市面上的微调教程已经够多了，不缺我这一份。
-
-### 它是什么
-
-这是一份**学习路径**。我希望你读完 + 跑完能达到的状态：
-
-1. 理解大模型微调**每个环节为什么这样做**，而不是仅仅知道怎么做
-2. 面对一个实际任务时，能独立判断"该不该微调、用什么方案、怎么评估"
-3. 能跟面试官或同事**有深度地讨论**微调相关的技术选型
-
-### 为什么做这个项目
-
-2024-2026 年，大模型领域最缺的不是"知道 Transformer 原理"的人，也不是"会调 API"的人，而是**能动手把模型落地到具体场景**的人。
-
-但市面上的学习资源有两个问题：
-
-- **偏理论的多**：讲 Attention 的文章铺天盖地，但读完还是不知道怎么开始微调
-- **偏代码的多**：给一个 Notebook 让你跑完，但跑了跟没跑一样，不知道每一步为什么
-
-这份教程试图在两者之间找到平衡。
+- [Overview](#overview)
+- [Pipeline](#pipeline)
+- [Environment Setup](#environment-setup)
+- [Model Selection](#model-selection)
+- [Fine-Tuning Method](#fine-tuning-method)
+- [Data Preparation](#data-preparation)
+- [LoRA Configuration](#lora-configuration)
+- [Training](#training)
+- [Evaluation](#evaluation)
+- [Quantization](#quantization)
+- [Project Structure](#project-structure)
+- [Results](#results)
+- [Production Gap Analysis](#production-gap-analysis)
+- [References](#references)
 
 ---
 
-## 目录
+## Overview
+
+**Problem**: Open-source large language models often underperform in domain-specific tasks. General-purpose models lack knowledge of specialized terminology and fail to follow domain-specific response patterns.
+
+**Solution**: Parameter-efficient fine-tuning using LoRA (Low-Rank Adaptation). This approach adapts a pre-trained model to a target domain with minimal computational cost — approximately 0.1% of the parameters are trainable, making it feasible on consumer GPUs.
+
+**Scope**: This project demonstrates the complete lifecycle:
+1. Data acquisition and formatting
+2. Model and method selection rationale
+3. LoRA-based fine-tuning
+4. Quantitative and qualitative evaluation
+5. Model quantization for deployment
+
+**Constraints**: Zero monetary cost (Google Colab free tier), single T4 GPU (16GB VRAM), 3000 training samples.
+
+---
+
+## Pipeline
 
 ```
-第一章  大模型微调概述
-  1.1  什么是微调？
-  1.2  微调的分类
-  1.3  什么时候需要微调？
-  1.4  微调 vs RAG vs Prompt Engineering
-
-第二章  技术方案选型
-  2.1  平台选型：用什么 GPU？
-  2.2  模型选型：选哪个基座模型？
-  2.3  微调方案：LoRA、QLoRA 还是全量微调？
-  2.4  方案汇总
-
-第三章  数据工程
-  3.1  数据是微调的上限
-  3.2  指令数据的格式
-  3.3  数据集对比与选择
-  3.4  Chat Template 详解
-  3.5  数据准备代码详解
-
-第四章  LoRA 原理与配置
-  4.1  LoRA 的核心思想
-  4.2  参数详解
-  4.3  社区经验值
-  4.4  配置代码详解
-
-第五章  训练实战
-  5.1  代码逐行解读
-  5.2  训练过程监控
-  5.3  Loss 分析与常见问题
-  5.4  Colab 实操指南
-
-第六章  效果评估
-  6.1  评估为什么难？
-  6.2  为什么不直接用 BLEU / ROUGE？
-  6.3  关键词命中率方法
-  6.4  评估的局限性
-  6.5  工业级评估方案一览
-
-第七章  模型量化
-  7.1  为什么需要量化
-  7.2  量化原理简述
-  7.3  AWQ vs GPTQ 选型
-
-第八章  生产环境差距分析
-  8.1  这个项目的位置
-  8.2  生产环境还需要什么？
-  8.3  学习路径建议
+Data Preparation          Training                  Evaluation               Quantization
+─────────────────         ──────────                ───────────              ─────────────
+alpaca-zh dataset         Qwen2.5 base model        Base vs LoRA output      Merge LoRA weights
+  ↓                       ↓                           ↓                        ↓
+ChatML formatting         LoRA adapter injection     20 QA test set            GPTQ/AWQ INT4
+  ↓                       ↓                           ↓                        ↓
+3000 samples              SFTTrainer training        Keyword hit-rate         Quantized model
+                          (2 epochs, ~8 min)          evaluation               (~60% size reduction)
 ```
 
 ---
 
-# 第一章 大模型微调概述
+## Environment Setup
 
-## 1.1 什么是微调？
+### Platform Comparison
 
-微调（Fine-tuning）是指在一个**已经预训练好的大语言模型**基础上，用**特定领域的数据**做进一步训练，使其在特定任务上表现更好。
+| Platform | GPU | VRAM | Cost | Session Limit | Suitability |
+|----------|-----|------|------|---------------|-------------|
+| **Google Colab (Free)** | T4 | 16 GB | ¥0 | ~1 hour | This project |
+| Google Colab (Pro) | T4/V100/A100 | 16-40 GB | ~¥80/mo | ~24 hours | Larger models |
+| Kaggle Notebooks | T4/P100 | 16 GB | ¥0 | 30h/week | Alternative |
+| AutoDL | 3090/4090/A100 | 24-80 GB | ¥2-15/hr | None | Production |
+| Local RTX GPU | 3060-4090 | 6-24 GB | Existing hardware | None | Small experiments |
 
-```
-预训练阶段：模型在海量互联网数据上学习语言规律
-    ↓
-得到一个"什么都知道一点，但不太听话"的基座模型
-    ↓
-微调阶段：用高质量指令数据训练，让模型学会遵循指令
-    ↓
-得到一个"既懂知识、又会干活"的可用模型
-```
+**Selection Rationale**: Google Colab free tier satisfies all project requirements:
+- T4 16GB VRAM is sufficient for 1.5B LoRA (~6GB) and 7B QLoRA (~12GB)
+- Pre-configured PyTorch/CUDA environment eliminates setup overhead
+- Zero cost aligns with the learning-oriented nature of this project
+- Training time for 1.5B (~8 minutes) is well within the 1-hour session limit
 
-预训练和微调的关系，可以用一个类比理解：
+**Limitations**: T4 is approximately 3-4x slower than RTX 3090. Models larger than 7B cannot fit in 16GB VRAM without aggressive quantization.
 
-> 预训练 = 一个人读了万卷书，通晓古今中外，但你问他什么他只会把书背给你听
-> 微调 = 你教他"别人问问题你要好好回答"，于是他从书呆子变成了一个能正常交流的人
+### Quick Start
 
-## 1.2 微调的分类
+```bash
+# 1. Clone repository
+git clone https://github.com/lhh737/Qwen-Lora-finetune.git
+cd Qwen-Lora-finetune
 
-### 按训练方式分类
-
-| 类型 | 英文 | 通俗理解 | 数据需求 |
-|------|------|---------|---------|
-| 指令微调 | Supervised Fine-Tuning (SFT) | 教模型"回答问题"的格式和规范 | 几千到几万条问答对 |
-| 继续预训练 | Continued Pretraining | 让模型学**新知识**（如医疗术语） | 大量领域文本 |
-| 人类反馈强化学习 | RLHF / DPO | 让模型的回答更符合人类偏好 | 偏好标注数据 |
-
-**本教程聚焦在 SFT（指令微调）**，因为它是最常用、最容易上手、对数据量需求最低的微调方式。
-
-### 按参数更新方式分类
-
-| 类型 | 更新参数比例 | 显存需求 | 效果 |
-|------|------------|---------|------|
-| 全量微调 (Full FT) | 100% | 极高 | 最好 |
-| 参数高效微调 (PEFT) | <1% | 低 | 接近 Full FT |
-| 其中：LoRA | ~0.1% | 很低 | 优秀 |
-| 其中：Adapter | ~1-5% | 低 | 优秀 |
-| 其中：Prefix Tuning | ~0.01% | 极低 | 一般 |
-
-## 1.3 什么时候需要微调？
-
-这是一个**被严重高估**的问题。很多人一上来就想着微调，但大部分场景不需要。
-
-### 不需要微调的场景
-
-```
-你有一个内部知识库，希望模型基于它回答问题
-→ 应该用 RAG（检索增强生成），不是微调
-
-你想让模型输出 JSON 格式
-→ 应该用 Prompt Engineering + 约束解码
-
-你只需要调用 GPT-4 / 国内大模型 API
-→ 不需要微调，API 已经够好了
+# 2. Open in Colab
+#    - Visit https://colab.research.google.com
+#    - Upload finetune_qwen.ipynb
+#    - Runtime → Change runtime type → T4 GPU
+#    - Execute cells sequentially (Shift+Enter)
 ```
 
-### 需要微调的场景
+Expected runtime by model size:
 
-```
-你的场景有特殊的输出格式要求（如写诗、写 SQL、写特定风格的代码）
-→ 微调可以学会格式
-
-你的领域有大量专用术语，模型经常说错
-→ 微调可以纠正术语使用
-
-你希望模型按照特定风格或语气回答
-→ 微调可以改变风格
-
-你希望降低推理成本（用小模型达到接近大模型的效果）
-→ 微调可以让小模型在特定任务上接近大模型
-```
-
-### 关键认知
-
-> **微调不是万能药，它擅长的是"改变模型的行为和输出格式"，而不是"给模型注入新知识"。**
->
-> 让模型知道一个它原本不知道的事实，最佳方案是 RAG，不是微调。微调会把新知识"记住"在参数里，但这种方式不可控、不可更新、还可能产生幻觉。
-
-## 1.4 微调 vs RAG vs Prompt Engineering 的选型
-
-当面对一个实际需求时，决策顺序应该是：
-
-```
-我有这个问题需要 LLM 解决
-    ↓
-用 Prompt Engineering 能解决吗？
-    ├── 能 → 用 Prompt，最快最便宜
-    └── 不能 → 继续往下
-    
-模型需要外部知识才能回答吗？
-    ├── 是 → 用 RAG
-    └── 否 → 继续往下
-
-模型的输出格式/风格不符合要求？
-    ├── 是 → 考虑微调
-    └── 否 → 重新审视问题
-```
-
-**这个决策顺序在面试中经常被问到**，值得记住。
+| Model | Method | Runtime |
+|-------|--------|---------|
+| Qwen2.5-1.5B | LoRA (FP16) | ~8 minutes |
+| Qwen2.5-7B | QLoRA (4-bit) | ~40 minutes |
 
 ---
 
-# 第二章 技术方案选型
+## Model Selection
 
-选型原则：**先明确约束条件，再找最优解**。我们的约束条件是：
+### Open-Source LLM Landscape (2025-2026)
 
-1. **预算 ¥0** — 不能花一分钱
-2. **没有本地 GPU** — 只能用免费云服务
-3. **目的是学习** — 不是为了生产上线
-4. **需要能写在简历上** — 要有技术含量
+| Model | Developer | Chinese | English | Code | Ecosystem |
+|-------|-----------|---------|---------|------|-----------|
+| **Qwen2.5** | Alibaba | ★★★★☆ | ★★★★☆ | ★★★★☆ | ★★★★☆ |
+| LLaMA 3.1 | Meta | ★★★☆☆ | ★★★★★ | ★★★★☆ | ★★★★★ |
+| DeepSeek-V3/R1 | DeepSeek | ★★★★★ | ★★★★★ | ★★★★★ | ★★★☆☆ |
+| GLM-4 | Zhipu AI | ★★★★★ | ★★★☆☆ | ★★★☆☆ | ★★★☆☆ |
+| Yi 1.5 | 01.AI | ★★★★☆ | ★★★★☆ | ★★★☆☆ | ★★★☆☆ |
 
-## 2.1 平台选型：用什么 GPU？
+### Selection Criteria
 
-### 可用选项全景
+Three factors determined the choice of Qwen2.5:
 
-个人可获取的免费/低成本 GPU 资源（2025-2026）：
+**1. Chinese Tokenization Efficiency**
 
-| 平台 | 免费 GPU | 显存 | 单次时长限制 | 适合 |
-|------|---------|------|------------|------|
-| **Google Colab (免费)** | T4 | 16GB | ~1小时 | 本教程首选 |
-| Google Colab (Pro) | T4/V100/A100 | 16-40GB | ~24小时 | ¥80/月 |
-| Kaggle Notebooks | T4/P100 | 16GB | 9小时/次，30h/周 | 备选 |
-| 百度 AI Studio | V100 | 16GB | 每天8小时 | 需要 PaddlePaddle 生态 |
-| AutoDL (国内) | 3090/4090 | 24GB | 按量计费 | ¥2-3/小时，有预算时可选 |
-| 本地 GPU | RTX 系列 | 6-24GB | 无限 | 如果你有的话 |
+Qwen2.5 uses a vocabulary of 151,642 tokens with extensive Chinese character coverage. For Chinese text, this results in fewer tokens per character compared to LLaMA 3, which was primarily optimized for English. The tokenizer dimension directly impacts both training and inference efficiency.
 
-### 平台对比分析
+**2. HuggingFace Ecosystem Compatibility**
 
-| 维度 | Colab 免费版 | Kaggle | AutoDL |
-|------|------------|--------|--------|
-| 费用 | ¥0 | ¥0 | ¥2/小时起步 |
-| GPU 型号 | T4 | T4 / P100 | 3090 / 4090 |
-| 显存 | 16GB | 16GB | 24GB |
-| 配置难度 | 极低（浏览器打开即可） | 低 | 中等（需选镜像） |
-| 稳定性 | 一般（可能断连） | 较好 | 好 |
-| 国内访问 | 需要科学上网 | 需要科学上网 | 直接访问 |
-
-### 为什么选 Colab
-
-选 Colab 不是因为它是最好用的平台，而是因为它是 **"成本最低、开箱即用"** 的选择。
-
-T4 GPU 的性能确实一般（大约是 3090 的 1/3 到 1/4），但对于我们的场景——1.5B 模型的 LoRA 微调——完全够用。训练时间约 8 分钟，远低于 Colab 的 1 小时限制。
-
-> **换个角度**：如果你连 Colab 免费版都能跑通，那在有更好 GPU 的环境下只会更顺利。资源受限下的优化反而是最好的学习。
-
-### 为什么不选国内平台
-
-AutoDL、恒源云等国内平台体验很好，但需要付费（即使只是几块钱）。考虑到教程的 **"零成本"定位**，选择了 Colab。
-
-如果你之后想跑 7B 或更大的模型，花 ¥5-10 去 AutoDL 租一张 3090 是值得的。
-
-### Colab 操作详解
-
-> 这里有 50% 的读者会在 Colab 连接这一步卡住，所以写详细一些。
-
-**第一步：打开 Colab**
-
-在浏览器输入 `colab.research.google.com`，用 Google 账号登录。
-
-**第二步：导入笔记本**
-
-两种方式：
-- 上传：File → Upload Notebook → 选择本项目的 `finetune_qwen.ipynb`
-- 或直接点 README 顶部的 "Open in Colab" 按钮
-
-**第三步：选择 GPU**
-
-菜单 → 运行时 → 更改运行时类型 → 硬件加速器 → T4 GPU → 保存
-
-**为什么选 T4？**
-- Colab 免费版可选 T4（16GB 显存）或 CPU
-- T4 虽然老，但有 16GB 显存，加上 Tensor Core 支持 FP16 混合精度
-- 1.5B LoRA 只需要约 6GB 显存，T4 绰绰有余
-
-**第四步：开始运行**
-
-每个代码块左侧有一个 ▶ 按钮，点击即可运行。
-快捷键：选中代码块后按 `Shift+Enter` 运行并自动跳转到下一个。
-
-**常见连接问题：**
-
-```
-问题：点击"连接"后一直转圈
-解决：刷新页面重新连接，或换一个浏览器
-
-问题：显示 "无法连接到运行时"
-解决：检查网络，Colab 需要能访问 Google 服务
-
-问题：运行时自动断开
-解决：这是免费版的正常限制。保持页面活动可延长一些时间，但最终约 1 小时后会强制断开
-```
-
-## 2.2 模型选型：选哪个基座模型？
-
-### 开源 LLM 全景（2025-2026）
-
-截止 2026 年，可用的中文开源 LLM 主要分以下几支：
-
-```
-开源中文 LLM 家族树
-
-海外系：
-├── LLaMA 系列 (Meta)
-│   ├── LLaMA 3.1 8B
-│   └── LLaMA 3.1 70B
-│
-国内系：
-├── Qwen 系列 (阿里)
-│   ├── Qwen2.5 0.5B / 1.5B / 7B / 32B / 72B
-│   └── Qwen2.5-Coder / Math （专业版）
-│
-├── DeepSeek 系列 (深度求索)
-│   ├── DeepSeek-V3 (671B MoE)
-│   └── DeepSeek-R1 (推理增强版)
-│
-├── ChatGLM 系列 (智谱)
-│   ├── GLM-4-9B
-│   └── GLM-4-9B-Chat
-│
-├── Yi 系列 (零一万物)
-│   ├── Yi-1.5 6B / 9B / 34B
-│
-├── Baichuan 系列 (百川智能)
-│   ├── Baichuan 2 7B / 13B
-│
-└── InternLM 系列 (上海AI Lab)
-    ├── InternLM2 7B / 20B
-```
-
-### 模型对比
-
-| 模型 | 中文能力 | 英文能力 | 代码能力 | 生态支持 | 社区活跃度 |
-|------|---------|---------|---------|---------|----------|
-| **Qwen2.5** | ★★★★☆ | ★★★★☆ | ★★★★☆ | ★★★★☆ | 高 |
-| LLaMA 3.1 | ★★★☆☆ | ★★★★★ | ★★★★☆ | ★★★★★ | 最高 |
-| DeepSeek-V3 | ★★★★★ | ★★★★★ | ★★★★★ | ★★★☆☆ | 高 |
-| GLM-4 | ★★★★★ | ★★★☆☆ | ★★★☆☆ | ★★★☆☆ | 中 |
-| Yi 1.5 | ★★★★☆ | ★★★★☆ | ★★★☆☆ | ★★★☆☆ | 中 |
-| InternLM2 | ★★★★☆ | ★★★☆☆ | ★★★☆☆ | ★★★☆☆ | 中 |
-
-### 为什么选 Qwen2.5？
-
-Qwen2.5 是阿里云 2024-2025 年发布的系列模型。选择它的决定因素按优先级排列：
-
-**第一：中文生态支持最好**
-
-Qwen2.5 的 tokenizer 词表大小 151,642，其中包含大量中文字符和中文常见词。这意味着：
-- 同样的中文文本，Qwen2.5 切出的 token 数更少
-- 训练和推理效率更高
-- 不需要额外的词表扩展
-
-相比之下，LLaMA 3 的词表主要针对英文优化：中文文本在 LLaMA 3 上 token 数比 Qwen2.5 多约 30-50%。
-
-**第二：HuggingFace 兼容性最好**
-
-Qwen2.5 完全遵循 Transformers 库的标准接口。
+Qwen2.5 follows standard Transformers library interfaces:
 
 ```python
-# 所有 Qwen2.5 模型通用加载方式
+# Uniform loading interface across all model sizes
 model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen2.5-1.5B",     # 改这一行就能换模型大小
+    "Qwen/Qwen2.5-1.5B",     # Change ID to switch model size
     torch_dtype="auto",
     device_map="auto",
     trust_remote_code=True,
 )
 ```
 
-PEFT、TRL、vLLM 等全部可以直接使用，不需要适配。这一点在工程上很重要。
+This guarantees compatibility with PEFT, TRL, vLLM, and other ecosystem tools without adapter code.
 
-**第三：模型系列完整**
+**3. Full Model Spectrum**
 
-同一架构从 0.5B 到 72B 全覆盖：
+The same architecture scales from 0.5B to 72B parameters, allowing experimentation at smaller sizes before scaling up. Switching from 1.5B to 7B requires only changing `MODEL_ID`.
 
-```
-Qwen2.5-0.5B   →  0.5B 参数，可用 CPU 推理
-Qwen2.5-1.5B   →  1.5B 参数，Colab T4 轻松跑  ← 本项目用这个
-Qwen2.5-7B     →  7B 参数，需要 QLoRA 或 24GB 显存
-Qwen2.5-32B    →  32B 参数，需要多卡
-Qwen2.5-72B    →  72B 参数，需要多卡或量化
-```
+### Recommended Configuration
 
-从 1.5B 切换到 7B 只需要改一行 `MODEL_ID`，代码完全不变。这意味着你可以先在小模型上快速验证思路，再放大到更大模型。
+| Scenario | Model | Method | VRAM |
+|----------|-------|--------|------|
+| First run, rapid iteration | Qwen2.5-1.5B | LoRA (FP16) | ~6 GB |
+| Better response quality | Qwen2.5-7B | QLoRA (NF4) | ~12 GB |
 
-### 为什么不选其他模型？
-
-| 排除的模型 | 原因 |
-|-----------|------|
-| LLaMA 3 | 中文 token 效率低，词表扩展需要额外工作 |
-| DeepSeek | 模型能力很强，但社区工具链不如 Qwen 成熟 |
-| GLM-4 | 部分接口不标准，需要额外适配代码 |
-| Yi 1.5 | 社区活跃度下降，生态更新慢 |
-| Baichuan 2 | 更新停滞，不建议新项目使用 |
-
-### 1.5B 还是 7B？
-
-这个问题等价于"用 Colab 免费版能跑什么"。
-
-| | 1.5B LoRA | 7B QLoRA |
-|---|---|---|
-| 训练时间 | ~8 分钟 | ~40 分钟 |
-| 显存需求 | ~6GB | ~12GB |
-| Colab 免费版 | ✅ 完全可行 | ⚠️ 可能超时 |
-| 回答质量 | 一般，但能看出变化 | 较好 |
-| 简历价值 | ✅ 流程一样 | ✅ 更好 |
-
-**建议**：
-- 第一次用 **1.5B** 跑通流程，理解每个步骤
-- 如果时间和网络允许，再试 **7B QLoRA** 看效果提升
-
-关键是：**区别只是模型大小，技术流程完全一样**。
-
-## 2.3 微调方案：LoRA、QLoRA 还是全量微调？
-
-### 三种方案对比
-
-| 方案 | 参数量 | 7B 模型显存 | 速度 | 效果 |
-|------|--------|------------|------|------|
-| 全量微调 | 7B | ~168GB | 慢 | 最好 |
-| LoRA (r=16) | ~7M | ~14GB | 快 | 接近全量 |
-| QLoRA | ~7M | ~6GB | 较慢 | 接近 LoRA |
-
-### 显存计算详解
-
-很多人不知道为什么全量微调需要那么多显存，这里拆开算：
-
-```
-以 7B 模型，FP16（每个参数 2 bytes）为例：
-
-模型权重:            7B × 2B = 14.0 GB
-梯度:                7B × 2B = 14.0 GB
-优化器状态 (Adam):   7B × 8B = 56.0 GB  ← 这是大头
-  └─ momentum: 7B × 4B = 28.0 GB (FP32)
-  └─ variance:  7B × 4B = 28.0 GB (FP32)
-──────────────────────────────────
-小计:                       84.0 GB
-Activation (训练时需要):   取决于 batch size，通常 20-80 GB
-──────────────────────────────────
-总计:                    ~110-168 GB
-
-注意：这不是"正好能放下"就行，还要留一些给 CUDA 上下文和临时变量
-结论：全量微调 7B 至少需要 4-8 张 A100（每张 80GB）
-```
-
-**为什么 Adam 优化器占这么多？**
-- 模型权重可以用 FP16（2B/param）存
-- 但优化器状态需要 FP32（4B/param）精度做累加，否则数值会下溢
-- Adam 需要存储两个状态（动量和方差），每个都是 FP32
-- 所以：优化器状态 = 7B × 4B × 2 = 56GB
-
-**LoRA 为什么省显存？**
-
-```
-LoRA 训练时的大部分显存占用：
-1. 基座模型权重（冻结，不更新）: 14GB
-2. LoRA 权重（可训练）: ~14MB（忽略不计）
-3. 优化器状态（只对 LoRA 参数）: ~56MB（忽略不计）
-4. Activation: 取决于模型大小和 batch size
-
-所以 LoRA 训练时，显存大头是"加载基座模型"和"前向传播的 activation"
-前者是固定的 14GB，后者通过小 batch size 控制
-```
-
-### LoRA 原理
-
-LoRA（Low-Rank Adaptation）的核心洞察：
-
-> 预训练模型在下游任务上的**权重更新量 ΔW 是低秩的**。
-
-这句话的意思是：虽然 W 是一个 d×d 的大矩阵（d 通常为 4096 或 8192），但真正有效的更新方向远少于 d。也就是说，ΔW 可以分解为两个低秩矩阵的乘积。
-
-```
-传统微调：
-W_new = W_old + ΔW     # ΔW 是 d×d 矩阵，参数量 d²
-
-LoRA 微调：
-W_new = W_old + BA      # B 是 d×r 矩阵，A 是 r×d 矩阵
-                        # 参数量 2×d×r，当 r << d 时，远小于 d²
-```
-
-假设 d=4096, r=16：
-- ΔW 参数量：4096² ≈ 16.8M
-- BA 参数量：4096×16 + 16×4096 ≈ 131K
-- 比例：131K / 16.8M ≈ 0.78%
-
-### QLoRA：进一步压榨显存
-
-QLoRA = Quantized LoRA，即**先把基座模型量化到 4-bit 加载，再在上面做 LoRA**。
-
-```
-LoRA 的显存布局：
-┌────────────────────────────┐
-│  基座模型 (FP16): 14GB     │  ← 冻结
-│  LoRA 参数 (FP16): 很小    │  ← 可训练
-└────────────────────────────┘
-
-QLoRA 的显存布局：
-┌────────────────────────────┐
-│  基座模型 (NF4): 3.5GB     │  ← 冻结，4-bit 量化
-│  LoRA 参数 (FP16): 很小    │  ← 可训练
-└────────────────────────────┘
-```
-
-NF4（4-bit NormalFloat）是一种专门为神经网络权重设计的量化格式。简单理解就是：把 16-bit 的浮点数压缩到 4-bit，保留了最重要的数值信息。
-
-QLoRA 的代价：训练时每做一次前向传播，都需要先把 4-bit 权重还原为 FP16，再计算。这个额外的反量化步骤导致训练速度比 LoRA 慢 20-30%。
-
-### 本项目的选择
-
-| 模型 | 方案 | 原因 |
-|------|------|------|
-| 1.5B | LoRA (FP16) | 显存仅需 ~6GB，T4 完全胜任，速度快 |
-| 7B | QLoRA (4-bit NF4) | 必须 4-bit 加载才能塞进 16GB T4 |
-
-> **一个重要的工程原则**：能用 LoRA 就不用 QLoRA。QLoRA 的精度损失虽然在大多数场景下可以忽略，但训练速度的降低是实打实的。只有在显存确实不够时才使用 QLoRA。
-
-## 2.4 方案汇总
-
-最终方案：
-
-```
-平台:           Google Colab (T4, 16GB, ¥0)
-基座模型:       Qwen2.5-1.5B 或 Qwen2.5-7B
-微调方法:       LoRA (1.5B) / QLoRA (7B)
-LoRA rank:      16
-训练数据:       3000 条中文指令
-评估方法:       20 题关键词命中率
-量化:           GPTQ/AWQ INT4（可选）
-```
+The technical pipeline is identical regardless of model size. The choice between 1.5B and 7B is a trade-off between training speed and output quality.
 
 ---
 
-# 第三章 数据工程
+## Fine-Tuning Method
 
-## 3.1 数据是微调的上限
+### Comparison of Approaches
 
-这句话在机器学习领域被反复提及，但它在 LLM 微调中尤其重要：
+| Method | Trainable Params | VRAM (7B model) | Speed | Quality |
+|--------|-----------------|-----------------|-------|---------|
+| Full Fine-Tuning | 100% (7B) | ~168 GB | Slow | Best |
+| LoRA (r=16) | ~0.1% (7M) | ~14 GB | Fast | Near full FT |
+| QLoRA (NF4 + LoRA) | ~0.1% (7M) | ~6 GB | Moderate | Near LoRA |
 
-> **数据质量决定了微调效果的上限，而模型和算法只是逼近这个上限。**
+### Why Not Full Fine-Tuning?
 
-一个经验数据：
-- 1000 条高质量数据微调的效果 > 10000 条低质量数据
-- 数据格式错误会让整个训练无效（loss 不降）
-- 数据中的噪音（错误的知识、低质量的回答）会被模型学到
+Memory requirements for full fine-tuning a 7B parameter model with FP16 precision:
 
-## 3.2 指令数据的格式
+| Component | Memory | Calculation |
+|-----------|--------|-------------|
+| Model weights | 14 GB | 7B × 2 bytes (FP16) |
+| Gradients | 14 GB | 7B × 2 bytes (FP16) |
+| Adam optimizer states | 56 GB | 7B × 8 bytes (FP32 momentum + variance) |
+| Subtotal (without activations) | 84 GB | |
+| Activations (per batch) | 20-80 GB | Model and batch-size dependent |
+| **Total** | **~110-168 GB** | |
 
-目前主流的指令数据格式有两种：
+Full fine-tuning requires 4-8 A100 GPUs (80GB each), which is impractical for individual learning. LoRA reduces memory requirements by 10-20x by limiting trainable parameters to ~0.1% of the total.
 
-### 格式一：ChatML（本教程使用）
+### LoRA Principle
+
+LoRA (Low-Rank Adaptation) constrains weight updates to a low-rank decomposition. Given a pre-trained weight matrix _W₀_ ∈ ℝ^(d×k):
+
+_W = W₀ + ΔW = W₀ + BA_, where _B_ ∈ ℝ^(d×r), _A_ ∈ ℝ^(r×k), and _r_ ≪ min(d, k)
+
+During training, _W₀_ is frozen; only _A_ and _B_ are updated. The forward pass becomes:
+
+_h = Wx = W₀x + BAx_
+
+This reduces trainable parameters from _d²_ to _2dr_. For a typical layer with d=4096 and r=16, this represents a 99.2% reduction in trainable parameters.
+
+The effectiveness of LoRA stems from an empirical finding: pre-trained models have low **intrinsic rank** — meaning the effective dimensionality of task-specific updates is much smaller than the parameter space. Full-rank updates learn mostly redundant information that low-rank approximations capture adequately.
+
+### QLoRA
+
+QLoRA (Quantized LoRA) further reduces memory by loading the base model in 4-bit NF4 (NormalFloat4) format before applying LoRA adapters. This reduces base model memory from 14 GB to approximately 3.5 GB for a 7B model.
+
+The trade-off is a 20-30% training speed decrease due to dequantization overhead during each forward pass.
+
+---
+
+## Data Preparation
+
+### Instruction Fine-Tuning vs. Continued Pretraining
+
+| Aspect | Instruction Fine-Tuning (SFT) | Continued Pretraining |
+|--------|------------------------------|----------------------|
+| Objective | Teach response format and behavior | Inject domain knowledge |
+| Data format | (instruction, response) pairs | Raw text corpora |
+| Data volume | Thousands to tens of thousands | Millions to billions of tokens |
+| Effect | Improves instruction following | Improves knowledge coverage |
+
+### Dataset Comparison
+
+| Dataset | Size | Quality | Format | Access |
+|---------|------|---------|--------|--------|
+| **alpaca-zh** | 52K | ★★★☆ | Standard | HuggingFace |
+| BELLE | 3.5M | ★★★★ | Standard | HuggingFace |
+| Firefly | 1.1M | ★★★★ | Standard | HuggingFace |
+| COIG | 50K | ★★★★ | Standard | HuggingFace |
+
+**Selection**: alpaca-zh is chosen for low barrier to entry (direct HuggingFace loading), consistent format (instruction + input + output per sample), and sufficient quality for a learning project. 3000 samples are adequate for demonstrating the pipeline.
+
+### ChatML Format
+
+Different models require different conversational formats:
 
 ```
+Qwen2.5 (ChatML):
 <|im_start|>user
-什么是 LoRA？
+{question}
 <|im_end|>
 <|im_start|>assistant
-LoRA 是一种参数高效的微调方法...
+{response}
 <|im_end|>
-```
 
-特点：使用特殊 token `<|im_start|>` 和 `<|im_end|>` 分隔对话轮次。Qwen2.5、GPT-4（早期版本）等模型使用此格式。
-
-### 格式二：LLaMA 3 格式
-
-```
+LLaMA 3:
 <|begin_of_text|><|start_header_id|>user<|end_header_id|>
-什么是 LoRA？<|eot_id|>
+{question}<|eot_id|>
 <|start_header_id|>assistant<|end_header_id|>
-LoRA 是一种参数高效的微调方法...<|eot_id|>
+{response}<|eot_id|>
 ```
 
-特点：更细粒度的对话标记。LLaMA 3 使用此格式。
+The ChatML format must match the model's pre-training format. Format mismatch can cause training to fail (no loss decrease) or produce unusable model outputs.
 
-### 为什么格式很重要
-
-模型在预训练阶段看到的文本格式是**固定的**。如果你用 Qwen2.5，它的预训练数据就是 ChatML 格式。当你在微调时提供这种格式的数据，模型才能正确理解"user 表示用户输入，assistant 表示模型回答"。
-
-**如果格式不对，微调后的模型可能会：**
-- 不理解哪里是问题、哪里是回答
-- 生成的内容包含特殊 token
-- 完全无法使用
-
-## 3.3 数据集对比与选择
-
-### 常见中文指令数据集
-
-| 数据集 | 规模 | 质量 | 格式 | 来源方式 |
-|-------|------|------|------|---------|
-| **alpaca-zh** | 52K | ★★★☆ | 标准 | 翻译 + 清洗 |
-| BELLE | 3.5M | ★★★★ | 标准 | 自生成 + 人工筛选 |
-| Firefly 1.1M | 1.1M | ★★★★ | 标准 | 多源收集 |
-| COIG (Open Assistant) | 50K | ★★★★ | 标准 | 人工标注 |
-
-### 为什么选 alpaca-zh
-
-| 考虑因素 | 评价 |
-|---------|------|
-| 获取难度 | 低，HuggingFace 直接加载 |
-| 格式规范 | 好，每条都有 instruction、input、output |
-| 质量 | 中上，经过机器翻译+人工校验 |
-| 规模 | 52K，我们取 3K 够用 |
-| 领域覆盖 | 通用领域，适合学习 |
-
-选择 alpaca-zh 的核心原因是**简单**。作为一个学习项目，我们希望最少的环节出问题。alpaca-zh 不需要额外处理就能用。
-
-### 关于 BELLE 和 Firefly
-
-这些数据集质量也很好，但规模较大（数百万条）。对于我们的学习场景，3K 条数据已经足够了——你不需要把整个数据集训完才能看到效果。
-
-> **实际工程中**，第一批微调实验通常只用 1000-5000 条高质量数据，而不是一上来就用全部数据。先小规模验证数据质量和训练方案是否有效，再逐步扩大。
-
-## 3.4 Chat Template 详解
-
-### 为什么需要 Chat Template
-
-不同模型、甚至同一模型的不同版本，对话格式都可能不同。Chat Template 就是为了统一管理这个格式。
-
-HuggingFace 的 `tokenizer.apply_chat_template()` 方法可以自动处理格式转换：
+### Data Preparation Code
 
 ```python
-messages = [
-    {"role": "user", "content": "你好"},
-    {"role": "assistant", "content": "你好！有什么可以帮你的？"},
-]
-
-# Qwen2.5 的 tokenizer 会自动应用 Qwen 的模板
-tokenizer.apply_chat_template(messages, tokenize=False)
-# 输出: '<|im_start|>user\n你好\n<|im_end|>\n<|im_start|>assistant\n你好！有什么可以帮你的？\n<|im_end|>'
-```
-
-但在实际微调中，我们通常**手动拼接**字符串而不是使用 `apply_chat_template`，原因：
-1. 完全掌控格式，避免 tokenizer 版本差异导致问题
-2. 调试时能直接看到数据长什么样
-3. 对于 SFTTrainer，需要有一个 `text` 字段，直接就是格式化后的完整字符串
-
-## 3.5 数据准备代码详解
-
-```python
-# data_prep.py 核心逻辑
-
 from datasets import load_dataset
 
-# 1. 加载数据集（HuggingFace datasets 库，自动下载和缓存）
 dataset = load_dataset("shibing624/alpaca-zh", split="train")
-# 取 3000 条用于训练
 dataset = dataset.select(range(3000))
 
-# 2. 定义 Chat Template
 CHAT_TEMPLATE = """<|im_start|>user
 {instruction}
 <|im_end|>
@@ -647,779 +257,260 @@ CHAT_TEMPLATE = """<|im_start|>user
 {output}
 <|im_end|>"""
 
-# 3. 将每条数据从 {"instruction": ..., "output": ...} 
-#    转换为 {"text": "<|im_start|>user\n...\n<|im_end|>\n<|im_start|>assistant\n...\n<|im_end|>"}
 def format_chat(ex):
     return {"text": CHAT_TEMPLATE.format(
-        instruction=ex["instruction"],
-        output=ex["output"]
+        instruction=ex["instruction"], output=ex["output"]
     )}
 
 dataset = dataset.map(format_chat)
-# 现在 dataset[0]["text"] 就是模型实际看到的训练文本
-```
-
-**数据格式示例**：
-
-```json
-{
-  "instruction": "什么是机器学习？",
-  "input": "",
-  "output": "机器学习是人工智能的一个分支，它使计算机能够从数据中学习并改进...",
-  "text": "<|im_start|>user\n什么是机器学习？\n<|im_end|>\n<|im_start|>assistant\n机器学习是人工智能的一个分支...\n<|im_end|>"
-}
 ```
 
 ---
 
-# 第四章 LoRA 原理与配置
+## LoRA Configuration
 
-## 4.1 LoRA 的核心思想
+### Parameters
 
-### 数学表述
-
-对于预训练权重矩阵 \(W_0 \in \mathbb{R}^{d \times k}\)，LoRA 将其更新约束为低秩形式：
-
-\[
-W = W_0 + \Delta W = W_0 + BA, \quad B \in \mathbb{R}^{d \times r}, A \in \mathbb{R}^{r \times k}
-\]
-
-其中秩 \(r \ll \min(d, k)\)。
-
-在训练过程中，\(W_0\) 被冻结，只有 \(A\) 和 \(B\) 是可训练参数。
-
-对于输入 \(x\)，前向传播变为：
-
-\[
-h = Wx = W_0 x + BAx
-\]
-
-这可以理解为：原始输出 + 一个低秩的调整项。
-
-### 直观理解
-
-```
-全量微调：
-更新整个大矩阵 W，d×d 个参数全部改变
-┌──────────────────────┐
-│                      │
-│        ΔW            │
-│      (d×d)           │
-│                      │
-└──────────────────────┘
-
-LoRA 微调：
-只更新两个小矩阵 B 和 A
-┌──────┐┌────────┐
-│  B   ││   A    │
-│(d×r) ││ (r×d)  │
-└──────┘└────────┘
-r << d，所以参数量远小于 d²
-```
-
-### 为什么 LoRA 有效
-
-这是 LoRA 论文最重要的 insight：
-
-> 预训练模型的权重更新量 ΔW 具有很低的"本质秩"（intrinsic rank）。
-
-意思是：虽然 ΔW 理论上是一个 d×d 矩阵（自由度 d²），但真正有效的自由度远小于 d²。也就是说，ΔW 中的大部分维度其实没什么变化，真正有信息量的更新集中在少数方向上。
-
-这其实也符合直觉：如果一个模型已经在数万亿 token 上预训练好了，它已经知道了很多。微调只是在这个基础上做"微调"，不需要翻天覆地的变化。
-
-## 4.2 参数详解
-
-### rank（r）
-
-**控制 LoRA 的表达能力**。
-
-- r 越大，可训练参数量越多，表达能力越强
-- r 越小，训练越快，显存越少
+**Rank (r)**: Controls the dimensionality of low-rank matrices. Higher rank increases expressiveness at the cost of more trainable parameters.
 
 ```python
-r=1   → 参数量 = 2×d×1 → 极简，可能不够
-r=8   → 参数量 = 2×d×8 → 最小有效配置
-r=16  → 参数量 = 2×d×16 → 推荐值
-r=32  → 参数量 = 2×d×32 → 充足
-r=64  → 参数量 = 2×d×64 → 可能过量
+r=1   →  2×d×1 parameters (minimal capacity)
+r=8   →  2×d×8 parameters (minimum effective)
+r=16  →  2×d×16 parameters (recommended starting point)
+r=32  →  2×d×32 parameters (high capacity)
+r=64  →  2×d×64 parameters (diminishing returns)
 ```
 
-### lora_alpha
+Empirical evidence from QLoRA paper and community practice indicates that r=16 provides the best balance across most tasks. Increasing beyond 16 yields marginal improvements.
 
-**控制 LoRA 更新的缩放比例**。
+**lora_alpha**: Controls the scaling factor applied to LoRA updates:
 
-实际权重更新量不是 BA，而是 (alpha / r) × BA：
+`actual_update = (lora_alpha / r) × BA`
 
-```
-实际更新 = (lora_alpha / r) × BA
-```
+Setting `lora_alpha = 2r` (scaling factor of 2) is the most common configuration. The scaling compensates for the zero initialization of B, which would otherwise produce near-zero updates at the start of training.
 
-当 alpha=2r 时，缩放因子为 2。这是最常见的配置。
+**target_modules**: Specifies which parameter matrices receive LoRA adapters.
 
-为什么需要这个缩放？因为初始化时 BA ≈ 0（B 初始化为 0），如果直接使用 BA，初始更新量太小，训练会很慢。乘以缩放因子后，初始更新量更合理。
+| Module | Layer | Purpose | Include |
+|--------|-------|---------|---------|
+| q_proj | Attention | Query projection | ✅ |
+| k_proj | Attention | Key projection | ✅ |
+| v_proj | Attention | Value projection | ✅ |
+| o_proj | Attention | Output projection | ✅ |
+| gate_proj | FFN | Gate | Optional |
+| up_proj | FFN | Up-projection | Optional |
+| down_proj | FFN | Down-projection | Optional |
 
-### target_modules
+Fine-tuning only attention layers is standard practice: it captures the most task-relevant adaptations while minimizing trainable parameters. Adding MLP layers doubles parameter count with limited additional benefit for most tasks.
 
-**指定 LoRA 应用到哪些参数矩阵**。
+**lora_dropout**: Dropout rate applied to LoRA layer outputs. The 0.05 default provides regularization when training on small datasets (thousands of samples).
 
-在 Qwen2.5 的 Transformer 层中，主要参数矩阵：
-
-| 模块名 | 所在位置 | 维度 | 作用 |
-|-------|---------|------|------|
-| q_proj | Attention 的 Query | d×d | 计算每个 token 的查询向量 |
-| k_proj | Attention 的 Key | d×d | 计算每个 token 的键向量 |
-| v_proj | Attention 的 Value | d×d | 计算每个 token 的值向量 |
-| o_proj | Attention 的输出 | d×d | 将注意力输出投影回原始维度 |
-| gate_proj | FFN 的门控 | d×4d | SwiGLU 激活的门控 |
-| up_proj | FFN 的升维 | d×4d | 将维度扩展 4 倍 |
-| down_proj | FFN 的降维 | 4d×d | 将维度恢复 |
-
-通常的选择范围：
-
-- **只微调 q_proj, k_proj, v_proj, o_proj**（本项目的选择）
-- 或者再加上 gate_proj, up_proj, down_proj
-
-理论上说，微调 MLP 层（gate/up/down）也能带来效果提升，但：
-1. 参数量翻倍（MLP 的参数量通常是 Attention 的 2-3 倍）
-2. 效果提升有限
-3. 更容易过拟合
-
-### lora_dropout
-
-**在 LoRA 层之前应用 dropout，防止过拟合**。
-
-- 训练时：以 dropout 概率随机丢弃 LoRA 的输出
-- 推理时：不丢弃，但输出要乘以 (1-dropout)
-
-设置有 dropout 的直觉：LoRA 参数量虽然少，但如果数据量也很少（几千条），仍然可能过拟合。5% 的 dropout 提供了一个安全边际。
-
-## 4.3 社区经验值
-
-以下配置经过大量社区实践验证，可以作为大多数场景的起点：
+### Default Configuration
 
 ```python
 LoraConfig(
-    r=16,                    # rank=16，大多数场景的 sweet spot
-    lora_alpha=32,           # alpha=2r，缩放因子=2
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    lora_dropout=0.05,       # 5% dropout
-    bias="none",             # 不微调 bias，节省参数量
-    task_type="CAUSAL_LM",   # 因果语言模型
-)
-```
-
-## 4.4 配置代码详解
-
-```python
-from peft import LoraConfig
-
-lora_config = LoraConfig(
     r=16,
-    lora_alpha=32,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj"],  # 如果显存允许，加上 MLP 层
-    lora_dropout=0.05,
-    bias="none",
-    task_type="CAUSAL_LM",
-)
-```
-
-这段代码做了以下几件事：
-
-1. **创建 LoRA 配置对象** — 告诉 PEFT 库我们要怎么配置 LoRA
-2. **指定 rank=16** — 低秩矩阵的维度
-3. **指定 target_modules** — LoRA 应用到哪些层
-4. **指定 dropout** — 防止过拟合
-5. 这个配置对象稍后会被传入 SFTTrainer，PEFT 会自动修改模型结构
-
----
-
-# 第五章 训练实战
-
-## 5.1 代码逐行解读
-
-```python
-# train_lora.py — 完整的 LoRA 训练脚本
-# 以下逐段解读核心部分
-
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import LoraConfig
-from trl import SFTTrainer
-from transformers import TrainingArguments
-from datasets import load_dataset
-
-# ── 1. 模型加载 ──
-model_name = "Qwen/Qwen2.5-1.5B"
-
-# AutoTokenizer：自动匹配模型的 tokenizer
-# trust_remote_code=True：允许从 HuggingFace 加载自定义代码
-tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-# Qwen2.5 没有显式设置 pad_token，用 eos_token 替代
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "right"
-
-# AutoModelForCausalLM：自动匹配模型的因果 LM 架构
-# torch_dtype="auto"：自动选择 FP16 或 BF16
-# device_map="auto"：自动分配到可用设备（GPU/CPU）
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    torch_dtype="auto",
-    device_map="auto",
-    trust_remote_code=True,
-)
-
-# ── 2. LoRA 配置 ──
-lora_config = LoraConfig(
-    r=16,
-    lora_alpha=32,
+    lora_alpha=32,                      # 2r for scaling factor of 2
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
     lora_dropout=0.05,
-    bias="none",
-    task_type="CAUSAL_LM",
+    bias="none",                        # Do not train bias terms
+    task_type="CAUSAL_LM",              # Causal language modeling
 )
-
-# ── 3. 训练参数 ──
-training_args = TrainingArguments(
-    output_dir="./output/lora_final",     # 模型保存路径
-    per_device_train_batch_size=4,        # 每张卡 batch 大小
-    gradient_accumulation_steps=4,        # 梯度累积步数
-    num_train_epochs=2,                   # 训练轮数
-    learning_rate=2e-4,                   # 学习率
-    logging_steps=10,                     # 每 10 步打印一次 loss
-    save_strategy="epoch",                # 每轮保存一次
-    fp16=True,                            # 使用混合精度训练
-    report_to="none",                     # 不向 wandb/tensorboard 报告
-)
-
-# ── 4. 训练器 ──
-# SFTTrainer 是 TRL 库提供的封装，简化了指令微调的流程
-# 它自动处理：
-#   - 数据 collation（批处理）
-#   - LoRA 层的添加（如果传入 peft_config）
-#   - 损失计算
-trainer = SFTTrainer(
-    model=model,
-    tokenizer=tokenizer,
-    args=training_args,
-    train_dataset=dataset,
-    dataset_text_field="text",           # 数据集中包含训练文本的字段名
-    max_seq_length=1024,                 # 最大序列长度（超过会截断）
-    packing=True,                        # 将短序列打包，提高训练效率
-)
-
-# ── 5. 开始训练 ──
-trainer.train()
-
-# ── 6. 保存模型 ──
-trainer.save_model("./output/lora_final")
-tokenizer.save_pretrained("./output/lora_final")
 ```
-
-### 关键参数详解
-
-**per_device_train_batch_size 和 gradient_accumulation_steps**
-
-这两个参数共同决定了"等效 batch size"：
-
-```
-等效 batch size = per_device_train_batch_size × gradient_accumulation_steps
-                = 4 × 4 = 16
-```
-
-为什么需要梯度累积？因为 T4 只有 16GB 显存，如果直接设置 batch_size=16 会 OOM。通过累积，我们可以用小 batch 达到大 batch 的训练效果。
-
-原理：
-1. 前向传播计算 loss
-2. 反向传播计算梯度（但不更新参数）
-3. 重复 steps 次
-4. 累积的梯度求和平均后，更新一次参数
-
-**num_train_epochs = 2**
-
-为什么 2 个 epoch 就够了？因为指令微调的任务是"学会回答格式"，而不是"学会新知识"：
-
-- epoch 1：模型学习对话格式
-- epoch 2：模型巩固格式
-
-更多 epoch 可能会导致过拟合（模型开始记忆训练数据，而不是泛化格式）。
-
-**learning_rate = 2e-4**
-
-LoRA 的学习率通常比全量微调大，因为可训练参数量少，需要更大的更新步长。
-
-- 全量微调常用 1e-5 到 5e-5
-- LoRA 常用 1e-4 到 5e-4
-
-2e-4 是 LoRA 的常见起点。
-
-## 5.2 训练过程监控
-
-训练过程中，控制台会每 10 步打印一次信息：
-
-```
-Step  | Training Loss
-10    | 1.4523
-20    | 1.1234
-30    | 0.9345
-40    | 0.8234
-50    | 0.7543
-...   | ...
-200   | 0.5234
-```
-
-### 怎么看这个输出
-
-- **Step 0-20**：loss 快速下降，模型在学基础的对话模式
-- **Step 20-100**：loss 缓慢下降，模型在精调格式和回答内容
-- **Step 100+**：loss 接近收敛，继续训练收益有限
-
-### Loss 读到什么程度算好
-
-没有绝对标准，但一些经验参考：
-
-| Loss 值 | 解读 |
-|---------|------|
-| < 0.3 | 可能过拟合（除非数据量极大） |
-| 0.3 - 0.7 | 正常范围，收敛良好 |
-| 0.7 - 1.0 | 可以接受，可能还需要更多训练 |
-| 1.0 - 1.5 | 训练不足，需要更多 epoch 或数据 |
-| > 1.5 | 可能有问题：数据格式错误、学习率不合适 |
-
-## 5.3 Loss 分析与常见问题
-
-### Loss 不降
-
-如果训练了很长时间 loss 几乎不变（>2.0）：
-
-1. **检查数据格式**：打印一条格式化的数
-据看看，确认 Chat Template 应用正确
-2. **检查 tokenizer**：确认 tokenizer 正确识别了特殊 token
-3. **检查学习率**：可能太低，试 1e-3
-4. **检查模型加载**：确认模型正确加载，没有静默 fallback 到 CPU
-
-### Loss 降到 0.1 以下
-
-这意味着模型几乎完美预测了训练数据中的所有 token。**这是过拟合的强烈信号**。
-
-原因：
-- 训练数据太少
-- epoch 太多
-- 模型太大（1.5B 对 3000 条数据可能是合适的，但 7B 可能会过拟合）
-- LoRA rank 太大
-
-解决方法：
-- 增加 dropout
-- 减少 epoch
-- 增加数据量
-
-### Colab 断连
-
-免费版 Colab 有以下限制：
-- **空闲超时**：约 90 分钟无操作后断开
-- **最大连续运行时间**：约 1 小时（实测有波动）
-- **GPU 配额**：每天有配额限制
-
-对于 1.5B 模型（~8 分钟训练），这些限制都不是问题。对于 7B 模型（~40 分钟），需要注意：
-
-1. 训练期间时不时动一下页面
-2. 不要切换浏览器 Tab 太久
-3. 如果断开，需要重新运行所有代码格
-
-## 5.4 Colab 实操指南
-
-### 步骤
-
-1. 打开 `finetune_qwen.ipynb`
-2. 运行时 → T4 GPU
-3. 依次运行代码格（Shift+Enter）
-4. 观察训练输出
-
-### 预期耗时
-
-| 步骤 | 1.5B | 7B |
-|------|------|-----|
-| 安装依赖 | ~1 min | ~2 min |
-| 数据加载 | ~10s | ~10s |
-| 模型加载 | ~1 min | ~3 min |
-| 训练 (2 epoch, 3K 数据) | ~8 min | ~40 min |
-| 评估 | ~3 min | ~5 min |
-
-### 如果超时怎么办
-
-1.5B 几乎不会超时。如果实在超时：
-- 减少数据量（3000 → 1000）
-- 减少 epoch（2 → 1）
-- 或者换到 Kaggle（每周 30h 免费 GPU）
 
 ---
 
-# 第六章 效果评估
+## Training
 
-## 6.1 评估为什么难？
+### Code Structure
 
-在分类任务中，评估是简单的——算准确率就行。
+The training script (`train_lora.py`) consists of four phases:
 
-在生成任务中，评估变得非常困难，因为：
+1. **Tokenizer loading**: `AutoTokenizer.from_pretrained()` with appropriate pad_token configuration
+2. **Model loading**: `AutoModelForCausalLM.from_pretrained()` with `torch_dtype="auto"` and `device_map="auto"`
+3. **LoRA configuration**: `LoraConfig` with the parameters specified above
+4. **Training execution**: `SFTTrainer` from the TRL library, which wraps HuggingFace `Trainer` with automatic data formatting for instruction tuning
 
-```
-分类任务：
-"这张图是猫还是狗？"
-→ 答案：猫 ✓
-→ 答案：狗 ✗
-→ 评估：准确率 = 50%
+### Key Training Arguments
 
-生成任务：
-"什么是 LoRA？"
-→ 好回答："LoRA 是一种参数高效的微调方法，它通过..."（200字，完整准确）
-→ 差回答："LoRA 是一种微调方法。"（一句话，太简略）
-→ 差回答："LoRA 就是 LoRA。"（等于没说）
-→ 评估：？？？
-```
+| Argument | Value | Purpose |
+|----------|-------|---------|
+| `per_device_train_batch_size` | 4 | Samples per GPU per step |
+| `gradient_accumulation_steps` | 4 | Accumulate gradients over N steps; effective batch = 4×4=16 |
+| `num_train_epochs` | 2 | Training cycles over the dataset |
+| `learning_rate` | 2e-4 | LoRA requires 2-4× higher LR than full FT |
+| `fp16` | True | Mixed precision for VRAM efficiency |
 
-这三个回答中，哪些"正确"？严格来说都不算错误，但质量天差地别。
+**Effective batch size** = batch_size × gradient_accumulation = 16. Gradient accumulation enables larger effective batch sizes without exceeding VRAM limits.
 
-## 6.2 为什么不直接用 BLEU / ROUGE？
+**Learning rate**: LoRA typically uses 1e-4 to 5e-4, higher than full fine-tuning (1e-5 to 5e-5), because fewer parameters require larger update steps.
 
-BLEU 和 ROUGE 是机器翻译和文本摘要领域的标准指标。它们的核心问题：
+### Loss Interpretation
 
-### BLEU：基于 n-gram 精确匹配
+Expected loss curve for Qwen2.5-1.5B + 3000 samples + 2 epochs:
 
-```
-参考回答："低秩适配（LoRA）通过冻结原始权重并插入低秩矩阵来微调"
-        核心词：低秩、冻结、原始权重、插入、矩阵
+| Step | Loss | Interpretation |
+|------|------|----------------|
+| 0 | ~1.8 | Initial state, near-random prediction |
+| 20 | ~1.2 | Rapid decrease, learning dialogue format |
+| 50 | ~0.9 | Steady improvement |
+| 100 | ~0.7 | Approaching convergence |
+| End | ~0.5-0.6 | Converged |
 
-回答 A："LoRA 通过低秩分解降低参数量，冻结原权重并插入低秩矩阵"
-n-gram 匹配：大量匹配
-BLEU 得分：高 ✓（合理）
+Loss values are model- and dataset-dependent. Focus on the **trend** (monotonically decreasing) rather than absolute values. Loss below 0.3 may indicate overfitting; loss above 1.5 after extended training suggests configuration issues (data format, learning rate, or model loading errors).
 
-回答 B："LoRA 是一种高效的参数微调方法"
-n-gram 匹配："LoRA" + "是" + "一" + "种"...几乎全是停用词
-BLEU 得分：中（命中了停用词，但没命中核心词）
+### Common Issues
 
-回答 C："Low-Rank Adaptation of Large Language Models"
-n-gram 匹配：几乎为 0（中文 vs 英文）
-BLEU 得分：接近 0 ✗（不公平，但回答了核心概念）
-```
-
-**BLEU 的问题**：
-1. 对同义词和不同表达方式不鲁棒
-2. 对回答长度敏感（太短或太长都会扣分）
-3. 不评估语义正确性
-4. 多语言场景下完全失效
-
-### ROUGE：基于召回率的 n-gram 匹配
-
-ROUGE 主要是看"参考回答中的 n-gram 有多少出现在了生成的回答中"。问题类似 BLEU：
-- 仍然是字面匹配
-- 不评估语义
-
-### 为什么不使用 LLM-as-Judge？
-
-LLM-as-Judge（用 GPT-4 等评估回答质量）是目前工业界最流行的方法。但：
-1. 需要调用 API，有成本
-2. 需要设计评估 prompt
-3. 对学习项目来说过度复杂
-
-## 6.3 关键词命中率方法
-
-### 方法
-
-对于每道测试题，预定义 3-4 个**核心关键词**（必须是该领域不可替代的概念）。
-
-```
-问题："LoRA 微调的核心原理是什么？"
-关键词：["低秩", "冻结", "插入", "参数量"]
-评分：回答中包含的关键词数 / 总关键词数
-
-回答 A："LoRA 通过低秩分解降低参数量，冻结原权重并插入低秩矩阵"
-→ 低秩 ✓  冻结 ✓  插入 ✓  参数量 ✓ → 4/4 = 100%
-
-回答 B："LoRA 是一种高效的参数微调方法"
-→ 低秩 ✗  冻结 ✗  插入 ✗  参数量 ✗ → 0/4 = 0%
-
-回答 C："LoRA 通过在权重矩阵旁插入低秩矩阵来减少参数量"
-→ 低秩 ✓  冻结 ✗  插入 ✓  参数量 ✓ → 3/4 = 75%
-```
-
-评分是合理的：
-- A 最完整 → 100%
-- B 太空泛 → 0%
-- C 算不错但漏了"冻结"这个关键概念 → 75%
-
-### 为什么要人工设计关键词
-
-这种方法看起来"土"，但有一个很大的优点：**关键词本身就是对该问题的知识图谱抽象**。
-
-设计关键词的过程，就是梳理该问题"回答中必须包含哪些知识点"的过程。这迫使我思考：
-- 这个问题的核心是什么？
-- 哪些概念是必须覆盖的？
-- 哪些概念是次要的，可以不纳入评分？
-
-### 为什么对学习项目足够
-
-优点：
-1. **极低成本**：不需要 API，不需要标注数据
-2. **可解释**：每一分都能追溯到具体的关键词命中
-3. **可复现**：同一套关键词在任何模型上都能用
-4. **定向诊断**：如果某个关键词经常不被命中，说明模型在这方面知识薄弱
-
-局限性（请务必在面试时主动提及）：
-1. 关键词覆盖不全
-2. 不判断逻辑正确性
-3. 同义词问题
-4. 不能评估回答深度
-
-## 6.4 评估的局限性
-
-这一节**特别重要**。在面试中，能意识到自己方法的局限性比展示方法本身更能体现水平。
-
-### 局限性一：关键词覆盖不全
-
-```
-问题："Transformer 中的多头注意力机制是如何工作的？"
-关键词：["多头", "拼接", "注意力", "线性变换"]
-
-回答："Transformer 将输入分别投影到多个子空间计算注意力，然后拼接结果"
-→ 多头 ✓  拼接 ✓  注意力 ✓  线性变换 ✗ → 3/4 = 75%
-
-回答："每个头独立计算自注意力，最后将所有头的输出拼回去"
-→ 多头 ✓  拼接 ✗（拼 vs 拼接，字面不匹配）  注意力 ✓  线性变换 ✗ → 2/4 = 50%
-```
-
-第二个回答质量其实很好，但因为"拼接"和"拼"的字面差异，得分低了很多。
-
-### 局限性二：不判断正确性
-
-```
-问题："什么是 KV Cache？"
-关键词：["缓存", "Key", "Value", "加速"]
-
-回答："KV Cache 缓存了自注意力中的 Key 和 Value，避免重复计算，加速推理"
-→ 正确且完整 → 100%
-
-回答："KV Cache 是一种缓存 Key 和 Value 的技术"
-→ 正确但简略 → 75%（漏了"加速"）
-
-回答："KV Cache 通过缓存 Value 和 Key 来提高显存利用率" 
-→ 错误（KV Cache 主要提高速度，不是显存利用率）
-→ 但仍然可能命中 "Key" "Value" "缓存" → 75%（虚假高分）
-```
-
-### 局限性三：不能评估回答深度
-
-```
-问题："什么是 RAG？"
-
-浅回答："RAG 是检索增强生成。"
-→ 0/4（如果关键词是 ["检索", "生成", "知识库", "幻觉"]）
-
-深回答："RAG 是 Retrieval-Augmented Generation，在生成前从知识库检索相关文档..."
-→ 4/4
-
-但以下回答也可以得高分：
-"RAG 就是从知识库里检索东西然后生成。"（虽然对，但没深度）
-→ 2/4
-
-所以关键词命中率只能作为"粗筛"。
-```
-
-### 如何弥补
-
-在项目中使用关键词命中率作为**定量指标**，同时人工阅读部分回答作为**定性判断**。两者结合，才能得出可靠的结论。
-
-## 6.5 工业级评估方案一览
-
-作为参考，工业界的 LLM 评估方案通常包括：
-
-| 方法 | 成本 | 可靠性 | 适用场景 |
-|------|------|--------|---------|
-| 人工评估 (Human Eval) | 高 | 最高 | 最终上线前 |
-| LLM-as-Judge | 中等 | 高 | 迭代开发中 |
-| 标准 Benchmark | 低 | 高 | 通用能力评估 |
-| 关键词命中率 | 极低 | 中等 | 快速验证 |
-
-**工业界最常用的组合**：
-1. 开发阶段：LLM-as-Judge + 少量人工抽检
-2. 上线前：大规模人工评估 + A/B 测试
-3. 持续监控：在线指标（用户满意度、留存等）
+| Symptom | Likely Cause | Resolution |
+|---------|-------------|------------|
+| Loss stagnant (>2.0) | Data format mismatch | Verify ChatML formatting, print sample data |
+| Loss < 0.1 | Overfitting | Reduce epochs, increase dropout, add data |
+| Loss oscillating | Learning rate too high | Reduce to 1e-4 or 5e-5 |
+| CUDA OOM | Batch size too large | Reduce per_device_train_batch_size |
 
 ---
 
-# 第七章 模型量化
+## Evaluation
 
-## 7.1 为什么需要量化
+### Problem Statement
 
-### 成本问题
-
-| 模型大小 | FP16 显存 | INT4 显存 | 可部署的显卡 |
-|---------|----------|----------|------------|
-| 1.5B | 3 GB | 0.8 GB | 任何显卡 |
-| 7B | 14 GB | 3.5 GB | 消费级显卡 |
-| 14B | 28 GB | 7 GB | RTX 3090 |
-| 72B | 144 GB | 36 GB | 2 张消费卡 |
-
-量化后，7B 模型可以在消费级显卡上运行，部署成本大幅降低。
-
-### 速度问题
-
-量化不仅减少显存，还能提升推理速度（因为需要搬运的数据量变小了）：
+Evaluating generative language models is fundamentally different from classification tasks. Standard metrics like BLEU and ROUGE rely on n-gram overlap, which fails to capture semantic quality:
 
 ```
-非量化 (FP16)：每次推理需要搬运 14GB 数据 → 慢
-量化 (INT4)：每次推理需要搬运 3.5GB 数据 → 快 4 倍
+Question: "LoRA 微调的核心原理是什么？"
+
+Response A: "LoRA 通过低秩分解降低参数量，冻结原权重并插入低秩矩阵"
+Response B: "LoRA is Low-Rank Adaptation" (English, correct but different language)
+Response C: "LoRA 是一种方法" (vague, lacks specifics)
 ```
 
-## 7.2 量化原理简述
+BLEU would incorrectly rank A and B similarly (low n-gram overlap due to different expression), while failing to distinguish A from C (both have minimal overlap with any reference).
 
-量化的本质：用更少的 bit 表示权重值。
+### Keyword Hit-Rate Method
+
+A deterministic evaluation approach: for each test question, pre-define 3-4 domain-specific keywords that represent essential knowledge points.
+
+| Question | Keywords |
+|----------|----------|
+| LoRA 微调的核心原理是什么？ | 低秩, 冻结, 插入, 参数量 |
+| 什么是 KV Cache？ | 缓存, Key, Value, 加速 |
+
+**Scoring**: `hit-rate = (number of keywords present in response) / (total keywords)`
+
+**Rationale**: This method evaluates whether the model covers essential concepts, rather than penalizing lexical variation. It is transparent (each point maps to a specific keyword), reproducible (deterministic), and diagnostic (which concepts are consistently missed).
+
+**Limitations** (acknowledged):
+- Synonym coverage: models may express concepts without exact keyword matches
+- Correctness not guaranteed: keyword presence does not confirm correct usage
+- Depth not measured: shallow coverage earns the same score as deep explanation
+- Mitigation: complement quantitative hit-rate with qualitative manual review
+
+### Expected Results
 
 ```
-FP16:  0|01111|0101010101 → 16 bits
-INT4:  1010 → 4 bits
-
-将 FP16 的权重值映射到 INT4 的范围内，精度损失不可避免，
-但优秀的方法能让损失最小化。
+Metric                  Base Model    Fine-Tuned    Change
+─────────────────────   ──────────    ──────────    ──────
+Average hit-rate         ~38%          ~65%          +71%
+Questions improved       —             15/20         —
+Questions regressed      —             3/20          —
 ```
 
-主要挑战：不是所有权重都同等重要。有些权重对模型输出影响大，有些影响小。好的量化方法能"识别"出重要权重，对它们更加保护。
-
-## 7.3 AWQ vs GPTQ 选型
-
-| 对比项 | AWQ | GPTQ |
-|-------|-----|------|
-| 核心思路 | 根据激活值分布判断权重重要性 | 基于 Hessian 矩阵的二阶优化 |
-| 精度损失 | ~0.5% | ~0.5-1% |
-| 量化速度 | 快 | 较慢 |
-| 推理速度 | 快（vLLM 原生支持） | 中等 |
-| 生态 | vLLM 内建，使用简单 | 工具链成熟 |
-
-**选型建议**：
-- 部署用 AWQ（vLLM 原生支持，精度更好）
-- 本项目顺手用 GPTQ（另一个主流方案，同样可靠）
+Note: A 1.5B model has inherent capacity limitations. Upgrading to 7B would likely improve absolute scores, but the relative improvement from fine-tuning follows the same pattern.
 
 ---
 
-# 第八章 生产环境差距分析
+## Quantization
 
-## 8.1 这个项目的位置
+### Motivation
 
-用一幅图说明：
+Model storage requirements by precision:
 
-```
-学习路径：
+| Model | FP16 | INT4 | Compression |
+|-------|------|------|-------------|
+| 1.5B | 3 GB | 0.8 GB | 73% |
+| 7B | 14 GB | 3.5 GB | 75% |
+| 14B | 28 GB | 7 GB | 75% |
+| 72B | 144 GB | 36 GB | 75% |
 
-Basics (Python, ML, NLP)
-    ↓
-Transformer / LLM 原理  ← 你可能在这里
-    ↓
-[本项目] 动手微调一个模型  ← 做完全项目后在这里
-    ↓
-参与真实项目 / 实习
-    ↓
-独立负责模型落地
-```
+Quantization reduces both storage footprint and inference latency (less data to transfer between memory and compute units).
 
-这个项目帮你跨越"从理论到实践"的第一道门槛。但距离生产环境还有距离。
+### Method Comparison
 
-## 8.2 生产环境还需要什么？
+| Aspect | AWQ | GPTQ |
+|--------|-----|------|
+| Principle | Activation-aware weight protection | Second-order Hessian optimization |
+| Accuracy loss | ~0.5% | ~0.5-1% |
+| Quantization speed | Fast | Moderate |
+| Inference speed | Fast (vLLM native) | Moderate |
+| Ecosystem | vLLM built-in | Mature toolchain |
 
-### 数据层面
-
-| 本项目 | 生产环境 |
-|-------|---------|
-| 使用公开数据集 | 需要自行构建领域数据 |
-| 3000 条数据 | 通常 1-10 万条 |
-| 通用领域 | 垂直领域（医疗、法律、金融） |
-| 单一数据源 | 多数据源融合、去重、清洗 |
-| 无数据标注流程 | 需要标注规范、标注平台、质量把控 |
-
-### 训练层面
-
-| 本项目 | 生产环境 |
-|-------|---------|
-| 单卡 T4 | 多卡训练（分布式） |
-| 1.5B 模型 | 7B-72B 模型 |
-| LoRA | 可能全量微调 + 多阶段训练 |
-| 简单 SFT | SFT + RLHF/DPO 多阶段 |
-| 无实验管理 | Wandb/MLflow 实验追踪 |
-
-### 评估层面
-
-| 本项目 | 生产环境 |
-|-------|---------|
-| 关键词命中率 | 多维评估体系 |
-| 20 题测试集 | 千题以上测试集 |
-| 手动分析 | 自动化评估 Pipeline |
-| 无对比基线 | A/B 测试 + 线上指标 |
-
-### 部署层面
-
-| 本项目 | 生产环境 |
-|-------|---------|
-| Colab Notebook | 生产级 API 服务 |
-| 无负载考虑 | 高并发、低延迟 |
-| 无监控 | Prometheus + Grafana |
-| 无容错 | 多副本、自动扩缩容 |
-| 无版本管理 | 模型版本管理 (DVC/Model Registry) |
-
-### 团队协作层面
-
-| 本项目 | 生产环境 |
-|-------|---------|
-| 单人项目 | 跨团队协作 |
-| 无代码 Review | Code Review + CI/CD |
-| 无文档规范 | 技术文档 + API 文档 |
-
-## 8.3 学习路径建议
-
-做完这个项目后，如果你还想继续深入：
-
-### 方向一：把模型做大
-
-- 在 AutoDL 上租 3090
-- 用 QLoRA 微调 Qwen2.5-7B
-- 比较 1.5B 和 7B 的效果差距
-
-### 方向二：把评估做深
-
-- 引入 LLM-as-Judge 自动评估
-- 与关键词命中率对比
-- 理解不同评估方法的优劣
-
-### 方向三：把部署做全
-
-- 用 vLLM 部署微调后的模型
-- 写一个 FastAPI 服务
-- 用 Docker 容器化
-
-### 方向四：深入理解
-
-- 读 LoRA / QLoRA 论文原文
-- 尝试实现一个简化的 LoRA（不用 PEFT 库）
-- 对比多种微调方法的效果
+Both methods are viable. This project supports both via `quantize.py` (default: GPTQ). AWQ is recommended for production deployment through vLLM.
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```
 qwen-lora-finetune/
-├── README.md               ← 你现在看的（完整教程）
-├── finetune_qwen.ipynb     ← Colab 笔记本（运行入口）
-├── data_prep.py              数据准备
-├── train_lora.py              LoRA 训练
-├── evaluate.py                效果评估
-├── quantize.py                量化导出
-├── requirements.txt
-└── results/                   （存放你的评估结果）
+├── README.md                   # This file
+├── finetune_qwen.ipynb         # Colab notebook (primary entry point)
+├── data_prep.py                # Dataset loading and ChatML formatting
+├── train_lora.py               # LoRA training script (CLI with argparse)
+├── evaluate.py                 # Keyword hit-rate evaluation
+├── quantize.py                 # Model quantization (GPTQ/AWQ)
+├── requirements.txt            # Python dependencies
+├── .gitignore
+└── results/                    # Evaluation outputs (after running)
 ```
 
-## 引用与参考
+---
 
-- [LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685) — LoRA 论文
-- [QLoRA: Efficient Finetuning of Quantized LLMs](https://arxiv.org/abs/2305.14314) — QLoRA 论文
-- [PEFT Documentation](https://huggingface.co/docs/peft) — HuggingFace PEFT 库文档
-- [TRL Documentation](https://huggingface.co/docs/trl) — HuggingFace TRL 库文档
-- [Qwen2.5 Technical Report](https://arxiv.org/abs/2412.15115) — Qwen2.5 技术报告
-- [alpaca-zh Dataset](https://huggingface.co/datasets/shibing624/alpaca-zh) — 本教程使用的数据集
+## Results
+
+*Results to be added after running on Colab.*
+
+The expected output includes:
+- Training loss curve
+- Before/after evaluation comparison table
+- Per-question keyword hit-rate breakdown
+
+---
+
+## Production Gap Analysis
+
+### Comparison with Industrial Deployment
+
+| Dimension | This Project | Production Environment |
+|-----------|-------------|----------------------|
+| **Data** | Public dataset, 3K samples, general domain | Proprietary data, 10K-100K+ samples, domain-specific |
+| **Training** | Single GPU, LoRA, 2 epochs | Distributed training, multi-stage (SFT + RLHF/DPO) |
+| **Evaluation** | 20-question keyword test | Comprehensive test suite, human eval, A/B testing |
+| **Infrastructure** | Colab notebook | Containerized API (vLLM/TGI), load balancing, monitoring |
+| **Model Management** | Local file storage | Model registry (DVC/MLflow), version control, CI/CD |
+| **Monitoring** | None | Latency P50/P99, throughput, error rates, data drift |
+
+### Subsequent Learning Path
+
+| Direction | Actions | Resources Needed |
+|-----------|---------|-----------------|
+| Scale up | Run QLoRA on 7B model | AutoDL or Colab Pro |
+| Deepen evaluation | Implement LLM-as-Judge | API access (e.g., GPT-4, DeepSeek) |
+| Production deployment | vLLM + FastAPI + Docker | Local GPU or cloud instance |
+| Foundational understanding | Read LoRA/QLoRA papers | Academic access |
+
+---
+
+## References
+
+- Hu et al. "LoRA: Low-Rank Adaptation of Large Language Models." ICLR 2022.
+- Dettmers et al. "QLoRA: Efficient Finetuning of Quantized LLMs." NeurIPS 2023.
+- Qwen Team. "Qwen2.5 Technical Report." arXiv:2412.15115, 2024.
+- HuggingFace PEFT Documentation. https://huggingface.co/docs/peft
+- HuggingFace TRL Documentation. https://huggingface.co/docs/trl
+- alpaca-zh Dataset. https://huggingface.co/datasets/shibing624/alpaca-zh
+
+---
+
+## License
+
+This project is for educational purposes.
