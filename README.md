@@ -4,6 +4,8 @@
 
 [![在 Colab 中打开](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/lhh737/Qwen-Lora-finetune/blob/main/finetune_qwen.ipynb)
 
+**中文** | [English](./README.en.md)
+
 ---
 
 ## 目录
@@ -361,8 +363,8 @@ Qwen2.5-1.5B + 3000 条数据 + 2 epoch 的预期 loss 曲线：
 
 ```
 qwen-lora-finetune/
-├── README.md                   # 英文文档
-├── README.zh.md                # 中文文档（本文件）
+├── README.md                   # 中文文档（本文件）
+├── README.en.md                # 英文文档
 ├── finetune_qwen.ipynb         # Colab 笔记本（主要入口）
 ├── data_prep.py                # 数据加载与格式化
 ├── train_lora.py               # LoRA 训练脚本（CLI，支持 argparse）
