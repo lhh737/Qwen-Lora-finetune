@@ -4,6 +4,8 @@ A complete pipeline for instruction fine-tuning of Qwen2.5 using LoRA, covering 
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/lhh737/Qwen-Lora-finetune/blob/main/finetune_qwen.ipynb)
 
+[中文](./README.md) | **English**
+
 ---
 
 ## Table of Contents
@@ -452,7 +454,8 @@ Both methods are viable. This project supports both via `quantize.py` (default: 
 
 ```
 qwen-lora-finetune/
-├── README.md                   # This file
+├── README.md                   # Chinese documentation
+├── README.en.md                # English documentation (this file)
 ├── finetune_qwen.ipynb         # Colab notebook (primary entry point)
 ├── data_prep.py                # Dataset loading and ChatML formatting
 ├── train_lora.py               # LoRA training script (CLI with argparse)
